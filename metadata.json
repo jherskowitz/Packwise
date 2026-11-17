@@ -1,0 +1,6 @@
+{
+  "name": "PackWise",
+  "description": "Smart travel packing checklist app with custom trip lists, weather-aware alerts, calendar event suggestions, Google Tasks import, Always Bring essentials, and post-trip resets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

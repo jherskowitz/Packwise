@@ -1,0 +1,193 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidAlwaysBringItem(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+             data.quantity is int && data.quantity >= 1 && data.quantity <= 99 &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 300)) &&
+             data.source is string && data.source in ['default', 'custom', 'google_tasks'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTrip(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.destination is string && data.destination.size() >= 1 && data.destination.size() <= 120 &&
+             data.country is string && data.country.size() <= 80 &&
+             data.latitude is number && data.latitude >= -90.0 && data.latitude <= 90.0 &&
+             data.longitude is number && data.longitude >= -180.0 && data.longitude <= 180.0 &&
+             data.startDateEpochDay is int &&
+             data.endDateEpochDay is int && data.endDateEpochDay >= data.startDateEpochDay &&
+             data.durationDays is int && data.durationDays >= 1 && data.durationDays <= 365 &&
+             data.activities is list && data.activities.size() <= 15 &&
+             (data.activities.size() == 0 || data.activities[0] is string) &&
+             data.calendarEventsSummary is list && data.calendarEventsSummary.size() <= 25 &&
+             (data.calendarEventsSummary.size() == 0 || data.calendarEventsSummary[0] is string) &&
+             data.weatherSummary is string && data.weatherSummary.size() <= 300 &&
+             data.weatherTempMinC is number &&
+             data.weatherTempMaxC is number &&
+             data.weatherRainProbMax is int && data.weatherRainProbMax >= 0 && data.weatherRainProbMax <= 100 &&
+             data.weatherAlertActive is bool &&
+             data.weatherAlertMessage is string && data.weatherAlertMessage.size() <= 300 &&
+             data.status is string && data.status in ['active', 'completed'] &&
+             data.resetCount is int && data.resetCount >= 0 && data.resetCount <= 9999 &&
+             data.weatherNotificationsEnabled is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidPackingItem(data, userId, tripId) {
+      return data.userId is string && data.userId == userId &&
+             data.tripId is string && data.tripId == tripId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 140 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+             data.quantity is int && data.quantity >= 1 && data.quantity <= 99 &&
+             data.isPacked is bool &&
+             data.isAlwaysBring is bool &&
+             data.contextReason is string && data.contextReason.size() <= 200 &&
+             data.sourceType is string &&
+             data.sourceType in ['always_bring', 'weather', 'duration', 'activity', 'calendar', 'google_tasks', 'custom'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/alwaysBring/{itemId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(itemId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(itemId) &&
+                       incoming().keys().hasAll(['userId', 'name', 'category', 'quantity', 'source', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'name', 'category', 'quantity', 'notes', 'source', 'createdAt', 'updatedAt']) &&
+                       isValidAlwaysBringItem(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(itemId) &&
+                       isValidAlwaysBringItem(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'quantity', 'notes', 'source', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(itemId);
+    }
+
+    match /users/{userId}/trips/{tripId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(tripId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(tripId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'destination', 'country', 'latitude', 'longitude',
+                         'startDateEpochDay', 'endDateEpochDay', 'durationDays',
+                         'activities', 'calendarEventsSummary', 'weatherSummary',
+                         'weatherTempMinC', 'weatherTempMaxC', 'weatherRainProbMax',
+                         'weatherAlertActive', 'weatherAlertMessage', 'status',
+                         'resetCount', 'weatherNotificationsEnabled', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'destination', 'country', 'latitude', 'longitude',
+                         'startDateEpochDay', 'endDateEpochDay', 'durationDays',
+                         'activities', 'calendarEventsSummary', 'weatherSummary',
+                         'weatherTempMinC', 'weatherTempMaxC', 'weatherRainProbMax',
+                         'weatherAlertActive', 'weatherAlertMessage', 'status',
+                         'resetCount', 'weatherNotificationsEnabled', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTrip(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(tripId) &&
+                       isValidTrip(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt && (
+                         // Action: Refresh live weather & alert status
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'weatherSummary', 'weatherTempMinC', 'weatherTempMaxC',
+                           'weatherRainProbMax', 'weatherAlertActive', 'weatherAlertMessage', 'updatedAt'
+                         ]) ||
+                         // Action: Update trip context, activities, calendar events, or notifications
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'destination', 'country', 'latitude', 'longitude',
+                           'startDateEpochDay', 'endDateEpochDay', 'durationDays',
+                           'activities', 'calendarEventsSummary', 'weatherNotificationsEnabled', 'updatedAt'
+                         ]) ||
+                         // Action: Complete or reset trip for next journey
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'status', 'resetCount', 'startDateEpochDay', 'endDateEpochDay',
+                           'durationDays', 'weatherAlertActive', 'weatherAlertMessage', 'updatedAt'
+                         ])
+                       );
+
+      allow delete: if isOwner(userId) && isValidId(tripId);
+
+      match /items/{itemId} {
+        allow list: if isOwner(userId) && isValidId(tripId);
+        allow get: if isOwner(userId) && isValidId(tripId) && isValidId(itemId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(tripId) &&
+                         isValidId(itemId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'tripId', 'name', 'category', 'quantity',
+                           'isPacked', 'isAlwaysBring', 'contextReason', 'sourceType',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'tripId', 'name', 'category', 'quantity',
+                           'isPacked', 'isAlwaysBring', 'contextReason', 'sourceType',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidPackingItem(incoming(), userId, tripId) &&
+                         (
+                           exists(/databases/$(database)/documents/users/$(userId)/trips/$(tripId)) ||
+                           existsAfter(/databases/$(database)/documents/users/$(userId)/trips/$(tripId))
+                         );
+
+        allow update: if isOwner(userId) &&
+                         isValidId(tripId) &&
+                         isValidId(itemId) &&
+                         isValidPackingItem(incoming(), userId, tripId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().tripId == existing().tripId &&
+                         incoming().createdAt == existing().createdAt && (
+                           // Action: Toggle packed state (or reset after trip)
+                           incoming().diff(existing()).affectedKeys().hasOnly(['isPacked', 'updatedAt']) ||
+                           // Action: Edit item details or Always Bring flag
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'name', 'category', 'quantity', 'isPacked',
+                             'isAlwaysBring', 'contextReason', 'sourceType', 'updatedAt'
+                           ])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(tripId) && isValidId(itemId);
+      }
+    }
+  }
+}
