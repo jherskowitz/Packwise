@@ -72,7 +72,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.HomeBasePreferences
+import com.example.data.model.DEFAULT_TRIP_ACTIVITIES
 import com.example.data.model.UiState
+import com.example.data.remote.WeatherRepository
 import com.example.notifications.WeatherNotificationHelper
 import com.example.ui.components.HomeCountryPickerDialog
 import com.example.ui.viewmodel.PackWiseViewModel
@@ -81,16 +83,7 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
-private val SUGGESTED_ACTIVITIES = listOf(
-  "City Walking",
-  "Hiking",
-  "Beach & Swim",
-  "Business Meetings",
-  "Evening Dining",
-  "Workout / Run",
-  "Photography",
-  "Cold / Snow",
-)
+private val SUGGESTED_ACTIVITIES = DEFAULT_TRIP_ACTIVITIES
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -362,7 +355,7 @@ fun TripPlannerScreen(
                     text = if (selectedPlace == null) {
                       "Select a destination above or tap Check to pull Open-Meteo daily temperatures and rain probabilities."
                     } else {
-                      "Tap Check to fetch the latest forecast for ${selectedPlace?.name}."
+                      "Tap Check to fetch the latest forecast for ${selectedPlace?.cityAndRegionLabel()}."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -387,11 +380,13 @@ fun TripPlannerScreen(
                 }
                 is UiState.Success -> {
                   val forecast = ws.data
+                  val displaySummary = WeatherRepository.formatSummaryForUnit(forecast, homeCountry.temperatureUnit)
+                  val displayAlert = WeatherRepository.formatAlertForUnit(forecast, homeCountry.temperatureUnit)
                   Text(
-                    text = forecast.summaryText,
+                    text = displaySummary,
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                   )
-                  if (forecast.alertActive && forecast.alertMessage.isNotBlank()) {
+                  if (forecast.alertActive && displayAlert.isNotBlank()) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                       modifier = Modifier
@@ -409,7 +404,7 @@ fun TripPlannerScreen(
                       )
                       Spacer(modifier = Modifier.width(8.dp))
                       Text(
-                        text = forecast.alertMessage,
+                        text = displayAlert,
                         style = MaterialTheme.typography.bodySmall,
                       )
                     }

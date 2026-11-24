@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,8 +25,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.FlightTakeoff
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.WbSunny
@@ -32,6 +36,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -50,17 +55,27 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.TemperatureUnit
 import com.example.data.model.Trip
+import com.example.data.model.TripSortOrder
 import com.example.data.model.UiState
+import com.example.data.remote.WeatherRepository
 import com.example.ui.components.DestinationHeaderImage
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HomeTripsScreen(
   tripsState: UiState<List<Trip>>,
   alwaysBringCount: Int,
   alwaysDoCount: Int,
+  temperatureUnit: TemperatureUnit = TemperatureUnit.CELSIUS,
+  tripSortOrder: TripSortOrder = TripSortOrder.CHRONOLOGICAL,
+  onSelectTripSortOrder: (TripSortOrder) -> Unit = {},
   onPlanNewTrip: () -> Unit,
   onOpenTrip: (String) -> Unit,
   onOpenAlwaysBring: () -> Unit,
@@ -88,10 +103,46 @@ fun HomeTripsScreen(
       }
 
       item {
-        Text(
-          text = "Your Trips",
-          style = MaterialTheme.typography.titleLarge,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          val countSuffix = (tripsState as? UiState.Success)?.data?.takeIf { it.isNotEmpty() }?.let {
+            " (${it.size})"
+          }.orEmpty()
+          Text(
+            text = "Your Trips$countSuffix",
+            style = MaterialTheme.typography.titleLarge,
+          )
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            FilterChip(
+              selected = tripSortOrder == TripSortOrder.CHRONOLOGICAL,
+              onClick = { onSelectTripSortOrder(TripSortOrder.CHRONOLOGICAL) },
+              leadingIcon = {
+                Icon(
+                  imageVector = Icons.Rounded.CalendarMonth,
+                  contentDescription = null,
+                  modifier = Modifier.size(16.dp),
+                )
+              },
+              label = { Text("Chronological") },
+              modifier = Modifier.testTag("sort_trips_chronological"),
+            )
+            FilterChip(
+              selected = tripSortOrder == TripSortOrder.RECENTLY_EDITED,
+              onClick = { onSelectTripSortOrder(TripSortOrder.RECENTLY_EDITED) },
+              leadingIcon = {
+                Icon(
+                  imageVector = Icons.Rounded.History,
+                  contentDescription = null,
+                  modifier = Modifier.size(16.dp),
+                )
+              },
+              label = { Text("Recently Edited") },
+              modifier = Modifier.testTag("sort_trips_recently_edited"),
+            )
+          }
+        }
       }
 
       when (tripsState) {
@@ -131,6 +182,8 @@ fun HomeTripsScreen(
             items(trips, key = { it.id }) { trip ->
               TripOverviewCard(
                 trip = trip,
+                temperatureUnit = temperatureUnit,
+                showEditedTimestamp = tripSortOrder == TripSortOrder.RECENTLY_EDITED,
                 onClick = { onOpenTrip(trip.id) },
               )
             }
@@ -302,6 +355,8 @@ private fun EmptyTripsCard(
 @Composable
 private fun TripOverviewCard(
   trip: Trip,
+  temperatureUnit: TemperatureUnit,
+  showEditedTimestamp: Boolean = false,
   onClick: () -> Unit,
 ) {
   val dateFmt = DateTimeFormatter.ofPattern("MMM d")
@@ -366,10 +421,10 @@ private fun TripOverviewCard(
             .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
           Text(
-            text = if (trip.country.isNotBlank()) "${trip.destination}, ${trip.country}" else trip.destination,
+            text = trip.formattedDestinationLabel(),
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             color = Color.White,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
           )
           Text(
@@ -390,22 +445,45 @@ private fun TripOverviewCard(
           )
           Spacer(modifier = Modifier.width(6.dp))
           Text(
-            text = trip.weatherSummary.ifBlank { "Live weather ready" },
+            text = WeatherRepository.formatSummaryForUnit(trip, temperatureUnit)
+              .ifBlank { "Live weather ready" },
             style = MaterialTheme.typography.bodySmall,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
           )
         }
 
-        if (trip.weatherAlertActive && trip.weatherAlertMessage.isNotBlank()) {
+        val displayAlert = WeatherRepository.formatAlertForUnit(trip, temperatureUnit)
+        if (trip.weatherAlertActive && displayAlert.isNotBlank()) {
           Spacer(modifier = Modifier.height(6.dp))
           Text(
-            text = trip.weatherAlertMessage,
+            text = displayAlert,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.secondary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
           )
+        }
+
+        if (showEditedTimestamp) {
+          val editedAtMillis = (trip.updatedAt ?: trip.createdAt)?.toDate()?.time
+          if (editedAtMillis != null && editedAtMillis > 0L) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Icon(
+                Icons.Rounded.History,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+              )
+              Spacer(modifier = Modifier.width(4.dp))
+              Text(
+                text = "Edited ${formatEditedTimestamp(editedAtMillis)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+          }
         }
 
         if (trip.resetCount > 0L) {
@@ -428,4 +506,12 @@ private fun TripOverviewCard(
       }
     }
   }
+}
+
+private fun formatEditedTimestamp(epochMillis: Long): String {
+  val dateTime = Instant.ofEpochMilli(epochMillis)
+    .atZone(ZoneId.systemDefault())
+    .toLocalDateTime()
+  val fmt = DateTimeFormatter.ofPattern("MMM d, h:mm a", Locale.getDefault())
+  return dateTime.format(fmt)
 }

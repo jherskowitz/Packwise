@@ -19,12 +19,14 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import com.example.data.model.TripSortOrder
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 private val Context.homeBaseDataStore: DataStore<Preferences> by preferencesDataStore(
   name = "packwise_home_base",
@@ -36,11 +38,19 @@ enum class HomeCountrySource(val label: String) {
   MANUAL("Set manually"),
 }
 
+enum class TemperatureUnit(val symbol: String, val label: String) {
+  CELSIUS("°C", "Celsius (°C)"),
+  FAHRENHEIT("°F", "Fahrenheit (°F)"),
+}
+
 data class HomeCountryPreference(
   val countryCode: String,
   val countryName: String,
   val source: HomeCountrySource,
-)
+) {
+  val temperatureUnit: TemperatureUnit
+    get() = HomeBasePreferences.temperatureUnitForCountry(countryCode)
+}
 
 class HomeBasePreferences(private val context: Context) {
 
@@ -60,6 +70,17 @@ class HomeBasePreferences(private val context: Context) {
       )
     } else {
       detectDeviceHomeCountry()
+    }
+  }
+
+  val tripSortOrderFlow: Flow<TripSortOrder> = appContext.homeBaseDataStore.data.map { prefs ->
+    val raw = prefs[KEY_TRIP_SORT_ORDER]
+    TripSortOrder.entries.firstOrNull { it.name == raw } ?: TripSortOrder.CHRONOLOGICAL
+  }
+
+  suspend fun saveTripSortOrder(sortOrder: TripSortOrder) {
+    appContext.homeBaseDataStore.edit { prefs ->
+      prefs[KEY_TRIP_SORT_ORDER] = sortOrder.name
     }
   }
 
@@ -215,6 +236,7 @@ class HomeBasePreferences(private val context: Context) {
     private val KEY_COUNTRY_CODE = stringPreferencesKey("home_country_code")
     private val KEY_COUNTRY_NAME = stringPreferencesKey("home_country_name")
     private val KEY_SOURCE = stringPreferencesKey("home_country_source")
+    private val KEY_TRIP_SORT_ORDER = stringPreferencesKey("trip_sort_order")
 
     private val COUNTRY_ALIASES: Map<String, String> = mapOf(
       "us" to "US",
@@ -306,5 +328,33 @@ class HomeBasePreferences(private val context: Context) {
       }
       return null
     }
+
+    private val FAHRENHEIT_COUNTRY_CODES = setOf(
+      "US", // United States
+      "BS", // Bahamas
+      "KY", // Cayman Islands
+      "LR", // Liberia
+      "PW", // Palau
+      "FM", // Micronesia
+      "MH", // Marshall Islands
+      "PR", // Puerto Rico
+      "VI", // U.S. Virgin Islands
+      "GU", // Guam
+      "AS", // American Samoa
+      "MP", // Northern Mariana Islands
+    )
+
+    fun temperatureUnitForCountry(countryCode: String): TemperatureUnit {
+      val upper = countryCode.trim().uppercase(Locale.US)
+      return if (upper in FAHRENHEIT_COUNTRY_CODES) TemperatureUnit.FAHRENHEIT else TemperatureUnit.CELSIUS
+    }
+
+    fun celsiusToUnit(tempC: Double, unit: TemperatureUnit): Double = when (unit) {
+      TemperatureUnit.CELSIUS -> tempC
+      TemperatureUnit.FAHRENHEIT -> (tempC * 9.0 / 5.0) + 32.0
+    }
+
+    fun formatTemp(tempC: Double, unit: TemperatureUnit): String =
+      "${celsiusToUnit(tempC, unit).roundToInt()}${unit.symbol}"
   }
 }

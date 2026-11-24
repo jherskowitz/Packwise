@@ -161,7 +161,7 @@ fun IntegrationsSettingsScreen(
               Column(modifier = Modifier.weight(1f)) {
                 Text(text = "Home Base Country", style = MaterialTheme.typography.titleMedium)
                 Text(
-                  text = "${homeCountry.countryName} (${homeCountry.countryCode}) · ${homeCountry.source.label}",
+                  text = "${homeCountry.countryName} (${homeCountry.countryCode}) · ${homeCountry.source.label} · ${homeCountry.temperatureUnit.label}",
                   style = MaterialTheme.typography.bodySmall,
                   color = MaterialTheme.colorScheme.primary,
                 )
@@ -169,7 +169,7 @@ fun IntegrationsSettingsScreen(
             }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-              text = "Adapters, eSIMs, and entry/currency tips are only recommended when your destination is outside your home country.",
+              text = "Adapters, eSIMs, and entry tips apply to international trips; weather temperatures are displayed in ${homeCountry.temperatureUnit.label}.",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

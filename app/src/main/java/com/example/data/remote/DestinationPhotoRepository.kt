@@ -23,11 +23,18 @@ class DestinationPhotoRepository {
   ): String? = withContext(Dispatchers.IO) {
     val cleanDest = destination.trim()
     if (cleanDest.isBlank()) return@withContext null
+    val cityOnly = cleanDest.substringBefore(",").trim()
 
     val candidates = buildList {
-      if (country.isNotBlank()) add("$cleanDest, $country")
       add(cleanDest)
-    }
+      if (cityOnly.isNotBlank() && !cityOnly.equals(cleanDest, ignoreCase = true) && country.isNotBlank()) {
+        add("$cityOnly, $country")
+      }
+      if (country.isNotBlank()) add("$cleanDest, $country")
+      if (cityOnly.isNotBlank() && !cityOnly.equals(cleanDest, ignoreCase = true)) {
+        add(cityOnly)
+      }
+    }.distinct()
 
     for (title in candidates) {
       val direct = fetchSummaryThumbnail(title)

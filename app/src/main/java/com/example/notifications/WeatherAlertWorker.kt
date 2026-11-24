@@ -12,7 +12,9 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.example.data.firebase.PackingRepository
+import com.example.data.local.HomeBasePreferences
 import com.example.data.remote.WeatherRepository
+import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
@@ -25,6 +27,7 @@ class WeatherAlertWorker(
     return try {
       val repo = PackingRepository(applicationContext)
       val weatherRepo = WeatherRepository()
+      val homeUnit = HomeBasePreferences(applicationContext).homeCountryFlow.first().temperatureUnit
       val today = LocalDate.now().toEpochDay()
       val activeTrips = repo.getActiveTripsOnce()
         .filter { it.weatherNotificationsEnabled && it.endDateEpochDay >= today && (it.latitude != 0.0 || it.longitude != 0.0) }
@@ -35,6 +38,7 @@ class WeatherAlertWorker(
           longitude = trip.longitude,
           startEpochDay = trip.startDateEpochDay,
           endEpochDay = trip.endDateEpochDay,
+          temperatureUnit = homeUnit,
         ).onSuccess { forecast ->
           repo.updateTripWeather(trip.id, forecast)
           if (forecast.alertActive && forecast.alertMessage.isNotBlank()) {

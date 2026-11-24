@@ -53,6 +53,7 @@ import androidx.navigation.navArgument
 import com.example.data.ai.AiChecklistGenerator
 import com.example.data.firebase.PackingRepository
 import com.example.data.firebase.configureAppCheck
+import com.example.data.local.CategoryPreferences
 import com.example.data.local.DeviceCalendarReader
 import com.example.data.local.HomeBasePreferences
 import com.example.data.model.TasksImportTarget
@@ -186,6 +187,7 @@ private fun PackWiseAppShell(
           workspaceRepository = GoogleWorkspaceRepository(),
           deviceCalendarReader = DeviceCalendarReader(appContext),
           homeBasePreferences = HomeBasePreferences(appContext),
+          categoryPreferences = CategoryPreferences(appContext),
           currentUserId = userId,
         ) as T
       }
@@ -204,6 +206,8 @@ private fun PackWiseAppShell(
   val tripAiRecommendationsMap by viewModel.tripAiRecommendationsState.collectAsStateWithLifecycle()
   val tripGuideLoadingMap by viewModel.tripGuideLoadingState.collectAsStateWithLifecycle()
   val homeCountry by viewModel.homeCountry.collectAsStateWithLifecycle()
+  val tripSortOrder by viewModel.tripSortOrder.collectAsStateWithLifecycle()
+  val customCategories by viewModel.customCategories.collectAsStateWithLifecycle()
   val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
   val pendingConsent by viewModel.pendingConsentIntent.collectAsStateWithLifecycle()
   val nanoStatus by viewModel.nanoStatus.collectAsStateWithLifecycle()
@@ -272,6 +276,7 @@ private fun PackWiseAppShell(
   LaunchedEffect(trips) {
     if (trips.isNotEmpty()) {
       viewModel.ensureTripHeaderPhotos(trips)
+      viewModel.ensureTripRegionLabels(trips)
     }
   }
 
@@ -400,6 +405,9 @@ private fun PackWiseAppShell(
                 tripsState = tripsState,
                 alwaysBringCount = alwaysBringCount,
                 alwaysDoCount = alwaysDoCount,
+                temperatureUnit = homeCountry.temperatureUnit,
+                tripSortOrder = tripSortOrder,
+                onSelectTripSortOrder = viewModel::setTripSortOrder,
                 onPlanNewTrip = {
                   viewModel.resetPlannerDrafts()
                   navController.navigate("planner")
@@ -428,9 +436,13 @@ private fun PackWiseAppShell(
             composable("always_bring") {
               AlwaysBringScreen(
                 alwaysBringState = alwaysBringState,
+                customCategories = customCategories,
                 onAddAlwaysBring = viewModel::addAlwaysBringItem,
                 onAddAlwaysDoTask = viewModel::addAlwaysDoTask,
                 onRecategorizeVaultItem = viewModel::recategorizeVaultItem,
+                onAddCustomCategory = viewModel::addCustomCategory,
+                onRenameVaultCategory = viewModel::renameVaultCategory,
+                onDeleteCustomCategory = viewModel::deleteCustomCategory,
                 onDeleteAlwaysBring = viewModel::deleteAlwaysBringItem,
                 onImportGoogleTasks = { activeTab ->
                   val target = if (activeTab == VaultItemType.ALWAYS_DO) {
@@ -494,15 +506,30 @@ private fun PackWiseAppShell(
                   aiRecommendationsState = tripAiRecommendationsMap[trip.id] ?: UiState.Idle,
                   guideLoadingState = tripGuideLoadingMap[trip.id] ?: UiState.Idle,
                   homeCountry = homeCountry,
+                  customCategories = customCategories,
                   onNavigateBack = { navController.popBackStack() },
                   onTogglePacked = { item -> viewModel.toggleItemPacked(trip.id, item) },
                   onAddManualItem = { name, category, reason, qty, scope ->
                     viewModel.addManualItemToTrip(trip.id, name, category, reason, qty, scope)
                   },
                   onDeleteItem = { itemId -> viewModel.deleteTripItem(trip.id, itemId) },
-                  onRecategorizeItem = { item, newScope, newCategory, saveToVault ->
-                    viewModel.recategorizeTripItem(trip.id, item, newScope, newCategory, saveToVault)
+                  onRecategorizeItem = { item, newScope, newCategory, saveToVault, newName, newQuantity, newReason ->
+                    viewModel.recategorizeTripItem(
+                      tripId = trip.id,
+                      item = item,
+                      newScope = newScope,
+                      newCategory = newCategory,
+                      saveToVault = saveToVault,
+                      newName = newName,
+                      newQuantity = newQuantity,
+                      newReason = newReason,
+                    )
                   },
+                  onAddCustomCategory = viewModel::addCustomCategory,
+                  onRenameCategory = { oldCat, newCat, removing ->
+                    viewModel.renameTripCategory(trip.id, oldCat, newCat, removing)
+                  },
+                  onDeleteCustomCategory = viewModel::deleteCustomCategory,
                   onRefreshWeather = {
                     viewModel.refreshLiveWeatherForTrip(trip) { alertMessage, _ ->
                       WeatherNotificationHelper.showWeatherPackingAlert(
@@ -541,6 +568,14 @@ private fun PackWiseAppShell(
                   onDismissAttraction = { attraction ->
                     viewModel.dismissGuideAttraction(trip, attraction)
                   },
+                  onUpdateTripActivities = { updatedActivities, newlyAdded, fetchSuggestions ->
+                    viewModel.updateTripActivitiesAndSuggest(
+                      trip = trip,
+                      updatedActivities = updatedActivities,
+                      newlyAddedActivities = newlyAdded,
+                      requestSuggestions = fetchSuggestions,
+                    )
+                  },
                   onCompleteAndResetTrip = { items, markCompleted ->
                     viewModel.completeAndResetTrip(trip, items, markCompleted)
                   },
@@ -555,6 +590,9 @@ private fun PackWiseAppShell(
                   tripsState = tripsState,
                   alwaysBringCount = alwaysBringCount,
                   alwaysDoCount = alwaysDoCount,
+                  temperatureUnit = homeCountry.temperatureUnit,
+                  tripSortOrder = tripSortOrder,
+                  onSelectTripSortOrder = viewModel::setTripSortOrder,
                   onPlanNewTrip = {
                     viewModel.resetPlannerDrafts()
                     navController.navigate("planner")

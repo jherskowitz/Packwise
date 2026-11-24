@@ -1,7 +1,10 @@
 package com.example.data.remote
 
+import com.example.data.local.HomeBasePreferences
+import com.example.data.local.TemperatureUnit
 import com.example.data.model.DailyForecastPoint
 import com.example.data.model.DestinationPlace
+import com.example.data.model.Trip
 import com.example.data.model.WeatherForecastSummary
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
@@ -97,8 +100,15 @@ class WeatherRepository {
   suspend fun searchDestinations(query: String): Result<List<DestinationPlace>> = runCatching {
     val trimmed = query.trim()
     if (trimmed.length < 2) return@runCatching emptyList()
-    val res = geocodingApi.searchPlaces(trimmed)
-    res.results.orEmpty()
+    var results = geocodingApi.searchPlaces(trimmed).results.orEmpty()
+    val regionHint = trimmed.substringAfter(",", "").trim()
+    if (results.isEmpty() && trimmed.contains(",")) {
+      val cityPart = trimmed.substringBefore(",").trim()
+      if (cityPart.length >= 2) {
+        results = geocodingApi.searchPlaces(cityPart).results.orEmpty()
+      }
+    }
+    val mapped = results
       .filter { it.name.isNotBlank() }
       .map {
         DestinationPlace(
@@ -109,6 +119,14 @@ class WeatherRepository {
           longitude = it.longitude,
         )
       }
+    if (regionHint.isNotBlank()) {
+      mapped.sortedByDescending { place ->
+        place.admin1.contains(regionHint, ignoreCase = true) ||
+          place.country.contains(regionHint, ignoreCase = true)
+      }
+    } else {
+      mapped
+    }
   }
 
   suspend fun fetchForecastForTrip(
@@ -116,6 +134,7 @@ class WeatherRepository {
     longitude: Double,
     startEpochDay: Long,
     endEpochDay: Long,
+    temperatureUnit: TemperatureUnit = TemperatureUnit.CELSIUS,
   ): Result<WeatherForecastSummary> = runCatching {
     val response = forecastApi.getDailyForecast(latitude = latitude, longitude = longitude)
     val daily = response.daily ?: throw IllegalStateException("Forecast unavailable for destination")
@@ -157,11 +176,11 @@ class WeatherRepository {
       recommendedGear += listOf("Waterproof Rain Jacket", "Compact Travel Umbrella")
     }
     if (minC <= 8.0) {
-      alertReasons += "Cold temps (${minC.roundToInt()}°C) — bring thermal layers & coat"
+      alertReasons += "Cold temps (${HomeBasePreferences.formatTemp(minC, temperatureUnit)}) — bring thermal layers & coat"
       recommendedGear += "Insulated Coat & Thermal Layer"
     }
     if (maxC >= 29.0) {
-      alertReasons += "Warm sun (${maxC.roundToInt()}°C) — pack sunscreen & UV sunglasses"
+      alertReasons += "Warm sun (${HomeBasePreferences.formatTemp(maxC, temperatureUnit)}) — pack sunscreen & UV sunglasses"
       recommendedGear += "SPF 50 Sunscreen & Polarized Sunglasses"
     }
     if (maxWind >= 35.0) {
@@ -171,10 +190,10 @@ class WeatherRepository {
 
     val summaryText = String.format(
       Locale.US,
-      "%s · %.0f°C–%.0f°C · %d%% rain · Winds up to %.0f km/h",
+      "%s · %s–%s · %d%% rain · Winds up to %.0f km/h",
       primaryCondition,
-      minC,
-      maxC,
+      HomeBasePreferences.formatTemp(minC, temperatureUnit),
+      HomeBasePreferences.formatTemp(maxC, temperatureUnit),
       maxRain,
       maxWind,
     )
@@ -204,6 +223,75 @@ class WeatherRepository {
       85, 86 -> "Snow showers"
       95, 96, 99 -> "Thunderstorms"
       else -> "Clear"
+    }
+
+    private val TEMP_RANGE_REGEX = Regex("""(-?\d+(?:\.\d+)?)\s*°\s*([CF])\s*[–-]\s*(-?\d+(?:\.\d+)?)\s*°\s*([CF])""")
+    private val SINGLE_TEMP_REGEX = Regex("""(-?\d+(?:\.\d+)?)\s*°\s*([CF])""")
+
+    fun formatSummaryForUnit(trip: Trip, unit: TemperatureUnit): String =
+      formatWeatherTextForUnit(trip.weatherSummary, trip.weatherTempMinC, trip.weatherTempMaxC, unit)
+
+    fun formatAlertForUnit(trip: Trip, unit: TemperatureUnit): String =
+      formatWeatherTextForUnit(trip.weatherAlertMessage, trip.weatherTempMinC, trip.weatherTempMaxC, unit)
+
+    fun formatSummaryForUnit(forecast: WeatherForecastSummary, unit: TemperatureUnit): String =
+      formatWeatherTextForUnit(forecast.summaryText, forecast.tempMinC, forecast.tempMaxC, unit)
+
+    fun formatAlertForUnit(forecast: WeatherForecastSummary, unit: TemperatureUnit): String =
+      formatWeatherTextForUnit(forecast.alertMessage, forecast.tempMinC, forecast.tempMaxC, unit)
+
+    private fun formatWeatherTextForUnit(
+      rawText: String,
+      minC: Double,
+      maxC: Double,
+      targetUnit: TemperatureUnit,
+    ): String {
+      if (rawText.isBlank()) return ""
+      val hasStoredBounds = minC != 0.0 || maxC != 0.0
+      val withRanges = TEMP_RANGE_REGEX.replace(rawText) { match ->
+        val rawMin = match.groupValues[1].toDoubleOrNull()
+        val unitMin = match.groupValues[2]
+        val rawMax = match.groupValues[3].toDoubleOrNull()
+        val unitMax = match.groupValues[4]
+        if (hasStoredBounds) {
+          "${HomeBasePreferences.formatTemp(minC, targetUnit)}–${HomeBasePreferences.formatTemp(maxC, targetUnit)}"
+        } else if (rawMin != null && rawMax != null) {
+          "${convertToUnit(rawMin, unitMin, targetUnit)}–${convertToUnit(rawMax, unitMax, targetUnit)}"
+        } else {
+          match.value
+        }
+      }
+
+      return SINGLE_TEMP_REGEX.replace(withRanges) { match ->
+        val value = match.groupValues[1].toDoubleOrNull() ?: return@replace match.value
+        val sourceUnit = match.groupValues[2]
+        val targetChar = if (targetUnit == TemperatureUnit.FAHRENHEIT) "F" else "C"
+        if (sourceUnit.equals(targetChar, ignoreCase = true)) {
+          match.value
+        } else {
+          val prefix = withRanges.substring(0, match.range.first)
+          when {
+            hasStoredBounds && prefix.endsWith("Cold temps (", ignoreCase = true) ->
+              HomeBasePreferences.formatTemp(minC, targetUnit)
+            hasStoredBounds && prefix.endsWith("Warm sun (", ignoreCase = true) ->
+              HomeBasePreferences.formatTemp(maxC, targetUnit)
+            else -> convertToUnit(value, sourceUnit, targetUnit)
+          }
+        }
+      }
+    }
+
+    private fun convertToUnit(
+      value: Double,
+      sourceUnitChar: String,
+      targetUnit: TemperatureUnit,
+    ): String {
+      val asCelsius = if (sourceUnitChar.equals("F", ignoreCase = true)) {
+        (value - 32.0) * 5.0 / 9.0
+      } else {
+        value
+      }
+      return HomeBasePreferences.formatTemp(asCelsius, targetUnit)
     }
   }
 }

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.ai.AiChecklistGenerator
 import com.example.data.ai.NanoAvailabilityStatus
 import com.example.data.firebase.PackingRepository
+import com.example.data.local.CategoryPreferences
 import com.example.data.local.DeviceCalendarReader
 import com.example.data.local.HomeBasePreferences
 import com.example.data.local.HomeCountryPreference
@@ -28,9 +29,11 @@ import com.example.data.model.SOURCE_ALWAYS_DO
 import com.example.data.model.TasksImportTarget
 import com.example.data.model.Trip
 import com.example.data.model.TripItemScope
+import com.example.data.model.TripSortOrder
 import com.example.data.model.UiState
 import com.example.data.model.VaultItemType
 import com.example.data.model.WeatherForecastSummary
+import com.example.data.model.sortedByOrder
 import com.example.data.remote.DestinationPhotoRepository
 import com.example.data.remote.GoogleWorkspaceRepository
 import com.example.data.remote.WeatherRepository
@@ -44,6 +47,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
@@ -55,6 +59,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.abs
 
 enum class GoogleWorkspacePendingAction {
   TASKS,
@@ -70,6 +75,7 @@ class PackWiseViewModel(
   private val workspaceRepository: GoogleWorkspaceRepository,
   private val deviceCalendarReader: DeviceCalendarReader,
   private val homeBasePreferences: HomeBasePreferences,
+  private val categoryPreferences: CategoryPreferences,
   private val currentUserId: String,
 ) : ViewModel() {
 
@@ -80,8 +86,26 @@ class PackWiseViewModel(
       initialValue = homeBasePreferences.detectDeviceHomeCountry(),
     )
 
-  val tripsState: StateFlow<UiState<List<Trip>>> = repository.observeTrips(currentUserId)
-    .map<List<Trip>, UiState<List<Trip>>> { UiState.Success(it) }
+  val customCategories: StateFlow<List<String>> = categoryPreferences.customCategoriesFlow
+    .stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.WhileSubscribed(5000L),
+      initialValue = emptyList(),
+    )
+
+  val tripSortOrder: StateFlow<TripSortOrder> = homeBasePreferences.tripSortOrderFlow
+    .stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.Eagerly,
+      initialValue = TripSortOrder.CHRONOLOGICAL,
+    )
+
+  val tripsState: StateFlow<UiState<List<Trip>>> = combine(
+    repository.observeTrips(currentUserId),
+    tripSortOrder,
+  ) { trips, sortOrder ->
+    UiState.Success(trips.sortedByOrder(sortOrder)) as UiState<List<Trip>>
+  }
     .catch { error ->
       val firestoreError = generateSequence(error) { it.cause }
         .filterIsInstance<FirebaseFirestoreException>()
@@ -209,6 +233,7 @@ class PackWiseViewModel(
   private var autoDownloadTriggered = false
 
   private val photoLookupAttempted = mutableSetOf<String>()
+  private val regionLookupAttempted = mutableSetOf<String>()
 
   init {
     viewModelScope.launch {
@@ -244,6 +269,12 @@ class PackWiseViewModel(
 
   fun showToast(message: String) {
     _toastMessage.value = message
+  }
+
+  fun setTripSortOrder(sortOrder: TripSortOrder) {
+    viewModelScope.launch {
+      homeBasePreferences.saveTripSortOrder(sortOrder)
+    }
   }
 
   fun setManualHomeCountry(countryCode: String, countryName: String) {
@@ -282,6 +313,41 @@ class PackWiseViewModel(
           )
           if (!photoUrl.isNullOrBlank()) {
             repository.updateTripHeaderImage(trip.id, photoUrl)
+          }
+        }
+      }
+    }
+  }
+
+  fun ensureTripRegionLabels(trips: List<Trip>) {
+    trips.forEach { trip ->
+      if (
+        trip.id.isNotBlank() &&
+        trip.destination.isNotBlank() &&
+        !trip.destination.contains(",") &&
+        regionLookupAttempted.add(trip.id)
+      ) {
+        viewModelScope.launch {
+          val candidates = weatherRepository.searchDestinations(trip.destination).getOrNull().orEmpty()
+          if (candidates.isEmpty()) return@launch
+          val hasCoords = trip.latitude != 0.0 || trip.longitude != 0.0
+          val best = if (hasCoords) {
+            candidates
+              .filter { abs(it.latitude - trip.latitude) < 1.0 && abs(it.longitude - trip.longitude) < 1.0 }
+              .minByOrNull { abs(it.latitude - trip.latitude) + abs(it.longitude - trip.longitude) }
+              ?: candidates.firstOrNull {
+                trip.country.isBlank() || it.country.equals(trip.country, ignoreCase = true)
+              }
+          } else {
+            candidates.firstOrNull {
+              trip.country.isBlank() || it.country.equals(trip.country, ignoreCase = true)
+            }
+          } ?: return@launch
+
+          val updatedDest = best.cityAndRegionLabel()
+          val updatedCountry = trip.country.ifBlank { best.country }
+          if (updatedDest.isNotBlank() && updatedDest != trip.destination && updatedDest.contains(",")) {
+            repository.updateTripDestination(trip.id, updatedDest, updatedCountry)
           }
         }
       }
@@ -437,6 +503,7 @@ class PackWiseViewModel(
       longitude = place.longitude,
       startEpochDay = _startEpochDay.value,
       endEpochDay = _endEpochDay.value,
+      temperatureUnit = homeCountry.value.temperatureUnit,
     ).onSuccess {
       _weatherForecastState.value = UiState.Success(it)
     }.onFailure { err ->
@@ -488,6 +555,7 @@ class PackWiseViewModel(
             longitude = place.longitude,
             startEpochDay = _startEpochDay.value,
             endEpochDay = _endEpochDay.value,
+            temperatureUnit = homeCountry.value.temperatureUnit,
           ).getOrNull()
         }
         if (forecast != null) _weatherForecastState.value = UiState.Success(forecast)
@@ -500,6 +568,10 @@ class PackWiseViewModel(
       val baseItems = mutableListOf<DraftPackingItem>()
       val seenNames = mutableSetOf<String>()
 
+      val currentUnit = homeCountry.value.temperatureUnit
+      val formattedSummary = forecast?.let { WeatherRepository.formatSummaryForUnit(it, currentUnit) }
+      val formattedAlert = forecast?.let { WeatherRepository.formatAlertForUnit(it, currentUnit) }.orEmpty()
+
       forecast?.recommendedGear.orEmpty().forEach { gear ->
         if (seenNames.add(gear.lowercase(Locale.ROOT))) {
           baseItems.add(
@@ -508,7 +580,7 @@ class PackWiseViewModel(
               category = "Weather Gear",
               quantity = 1L,
               isAlwaysBring = false,
-              contextReason = forecast?.alertMessage?.ifBlank { forecast.summaryText } ?: "Live weather forecast",
+              contextReason = formattedAlert.ifBlank { formattedSummary ?: "Live weather forecast" },
               sourceType = "weather",
             )
           )
@@ -535,9 +607,9 @@ class PackWiseViewModel(
       val calSummary = events.map { ev ->
         if (ev.location.isNotBlank()) "${ev.title} (${ev.location})" else ev.title
       }
-      val resolvedDest = place?.name ?: destText
+      val resolvedDest = place?.cityAndRegionLabel()?.ifBlank { destText } ?: destText
       val resolvedCountry = place?.country.orEmpty()
-      val weatherSummary = forecast?.summaryText ?: "Seasonal weather (coordinates pending)"
+      val weatherSummary = formattedSummary ?: "Seasonal weather (coordinates pending)"
       val headerPhotoUrl = withTimeoutOrNull(2_500L) {
         destinationPhotoRepository.fetchDestinationPhotoUrl(resolvedDest, resolvedCountry)
       }.orEmpty()
@@ -557,7 +629,7 @@ class PackWiseViewModel(
         weatherTempMaxC = forecast?.tempMaxC ?: 0.0,
         weatherRainProbMax = forecast?.rainProbMax ?: 0L,
         weatherAlertActive = forecast?.alertActive ?: false,
-        weatherAlertMessage = forecast?.alertMessage.orEmpty(),
+        weatherAlertMessage = formattedAlert,
         weatherNotificationsEnabled = weatherNotificationsEnabled,
         draftItems = baseItems,
         knownAlwaysBring = knownAlwaysBring,
@@ -682,16 +754,60 @@ class PackWiseViewModel(
     }
   }
 
+  fun updateTripActivitiesAndSuggest(
+    trip: Trip,
+    updatedActivities: List<String>,
+    newlyAddedActivities: List<String>,
+    requestSuggestions: Boolean = true,
+  ) {
+    val cleanUpdated = updatedActivities
+      .map { it.trim().take(60) }
+      .filter { it.isNotBlank() }
+      .distinctBy { it.lowercase(Locale.ROOT) }
+      .take(15)
+    val cleanAdded = newlyAddedActivities
+      .map { it.trim().take(60) }
+      .filter { it.isNotBlank() }
+      .distinctBy { it.lowercase(Locale.ROOT) }
+
+    viewModelScope.launch {
+      repository.updateTripActivities(trip.id, cleanUpdated)
+        .onSuccess {
+          val updatedTrip = trip.copy(activities = cleanUpdated)
+          if (requestSuggestions) {
+            if (cleanAdded.isNotEmpty()) {
+              _toastMessage.value = "Added ${cleanAdded.joinToString(", ")} — getting packing suggestions..."
+            }
+            suggestAiItemsForTrip(
+              trip = updatedTrip,
+              forceRefresh = true,
+              focusActivities = cleanAdded,
+            )
+          } else {
+            _toastMessage.value = if (cleanAdded.isNotEmpty()) {
+              "Added ${cleanAdded.joinToString(", ")} to ${trip.destination}."
+            } else {
+              "Updated planned activities."
+            }
+          }
+        }
+        .onFailure { err ->
+          _toastMessage.value = err.localizedMessage ?: "Failed to update trip activities."
+        }
+    }
+  }
+
   fun suggestAiItemsForTrip(
     trip: Trip,
     forceRefresh: Boolean = false,
+    focusActivities: List<String> = emptyList(),
   ) {
     val currentState = _tripAiRecommendationsState.value[trip.id]
     if (!forceRefresh) {
       if (currentState is UiState.Loading) return
       if (currentState is UiState.Success && currentState.data.items.isNotEmpty()) return
     }
-    if (currentState is UiState.Loading) return
+    if (currentState is UiState.Loading && focusActivities.isEmpty()) return
 
     viewModelScope.launch {
       _tripAiRecommendationsState.value = _tripAiRecommendationsState.value + (trip.id to UiState.Loading)
@@ -730,6 +846,7 @@ class PackWiseViewModel(
         dateRangeLabel = formatTripDateRange(trip),
         homeCountry = home.countryName,
         isInternationalOverride = isIntl,
+        focusActivities = focusActivities,
         onNanoDownloadable = {
           if (!autoDownloadTriggered) {
             autoDownloadTriggered = true
@@ -743,12 +860,30 @@ class PackWiseViewModel(
         if (trip.travelGuide == null && generated.travelGuide != null) {
           repository.updateTripTravelGuide(trip.id, generated.travelGuide)
         }
-        val freshItems = generated.items.filter { it.name.trim().lowercase(Locale.ROOT) !in existingNames }
+        val focusTokens = focusActivities.map { it.lowercase(Locale.ROOT) }
+        val freshItems = generated.items
+          .filter { it.name.trim().lowercase(Locale.ROOT) !in existingNames }
+          .let { list ->
+            if (focusTokens.isEmpty()) {
+              list
+            } else {
+              list.sortedByDescending { draft ->
+                val reasonLower = draft.contextReason.lowercase(Locale.ROOT)
+                val catLower = draft.category.lowercase(Locale.ROOT)
+                when {
+                  focusTokens.any { token -> reasonLower.contains(token) } -> 2
+                  draft.sourceType.equals("activity", ignoreCase = true) || catLower == "activity gear" -> 1
+                  else -> 0
+                }
+              }
+            }
+          }
         _tripAiRecommendationsState.value = _tripAiRecommendationsState.value + (
           trip.id to UiState.Success(
             AiItemRecommendation(
               engineLabel = generated.engineLabel,
               items = freshItems,
+              focusActivities = focusActivities,
             )
           )
         )
@@ -936,6 +1071,7 @@ class PackWiseViewModel(
             longitude = place.longitude,
             startEpochDay = _startEpochDay.value,
             endEpochDay = _endEpochDay.value,
+            temperatureUnit = homeCountry.value.temperatureUnit,
           ).getOrNull()
         }
         if (forecast != null) _weatherForecastState.value = UiState.Success(forecast)
@@ -948,6 +1084,10 @@ class PackWiseViewModel(
       val draftItems = mutableListOf<DraftPackingItem>()
       val seenNames = mutableSetOf<String>()
 
+      val currentUnit = homeCountry.value.temperatureUnit
+      val formattedSummary = forecast?.let { WeatherRepository.formatSummaryForUnit(it, currentUnit) }
+      val formattedAlert = forecast?.let { WeatherRepository.formatAlertForUnit(it, currentUnit) }.orEmpty()
+
       forecast?.recommendedGear.orEmpty().forEach { gear ->
         if (seenNames.add(gear.lowercase(Locale.ROOT))) {
           draftItems.add(
@@ -956,7 +1096,7 @@ class PackWiseViewModel(
               category = "Weather Gear",
               quantity = 1L,
               isAlwaysBring = false,
-              contextReason = forecast?.alertMessage?.ifBlank { forecast.summaryText } ?: "Live weather forecast",
+              contextReason = formattedAlert.ifBlank { formattedSummary ?: "Live weather forecast" },
               sourceType = "weather",
             )
           )
@@ -983,7 +1123,7 @@ class PackWiseViewModel(
       val calSummary = events.map { ev ->
         if (ev.location.isNotBlank()) "${ev.title} (${ev.location})" else ev.title
       }
-      val resolvedDest = place?.name ?: destText
+      val resolvedDest = place?.cityAndRegionLabel()?.ifBlank { destText } ?: destText
       val resolvedCountry = place?.country.orEmpty()
       val headerPhotoUrl = withTimeoutOrNull(2_500L) {
         destinationPhotoRepository.fetchDestinationPhotoUrl(resolvedDest, resolvedCountry)
@@ -999,12 +1139,12 @@ class PackWiseViewModel(
         durationDays = durationDays,
         activities = activities,
         calendarEventsSummary = calSummary,
-        weatherSummary = forecast?.summaryText ?: "Seasonal weather (coordinates pending)",
+        weatherSummary = formattedSummary ?: "Seasonal weather (coordinates pending)",
         weatherTempMinC = forecast?.tempMinC ?: 0.0,
         weatherTempMaxC = forecast?.tempMaxC ?: 0.0,
         weatherRainProbMax = forecast?.rainProbMax ?: 0L,
         weatherAlertActive = forecast?.alertActive ?: false,
-        weatherAlertMessage = forecast?.alertMessage.orEmpty(),
+        weatherAlertMessage = formattedAlert,
         weatherNotificationsEnabled = weatherNotificationsEnabled,
         draftItems = draftItems,
         knownAlwaysBring = knownAlwaysBring,
@@ -1093,18 +1233,134 @@ class PackWiseViewModel(
     newScope: TripItemScope,
     newCategory: String,
     saveToVault: Boolean,
+    newName: String = item.name,
+    newQuantity: Long = item.quantity,
+    newReason: String = item.contextReason,
   ) {
+    val resolvedName = newName.trim().ifBlank { item.name }
+    if (resolvedName.isBlank()) return
     viewModelScope.launch {
-      repository.recategorizeTripItem(tripId, item, newScope, newCategory, saveToVault)
+      if (newScope != TripItemScope.ALWAYS_DO &&
+        newCategory.trim().isNotBlank() &&
+        CategoryPreferences.DEFAULT_PACKING_CATEGORIES.none { it.equals(newCategory.trim(), ignoreCase = true) }
+      ) {
+        categoryPreferences.addCustomCategory(newCategory.trim())
+      }
+      repository.recategorizeTripItem(
+        tripId = tripId,
+        item = item,
+        newScope = newScope,
+        newCategory = newCategory,
+        saveToVault = saveToVault,
+        newName = resolvedName,
+        newQuantity = newQuantity,
+        newReason = newReason,
+      )
         .onSuccess {
           val label = when (newScope) {
             TripItemScope.ALWAYS_DO -> "Always-Do"
-            TripItemScope.ALWAYS_BRING -> "Always Bring ($newCategory)"
+            TripItemScope.ALWAYS_BRING -> "Always Bring (${newCategory.ifBlank { "Essentials" }})"
             TripItemScope.TRIP_SPECIFIC -> newCategory.ifBlank { "Trip-Specific" }
           }
-          _toastMessage.value = "Moved \"${item.name}\" to $label"
+          _toastMessage.value = if (!resolvedName.equals(item.name, ignoreCase = false)) {
+            "Updated \"$resolvedName\" ($label)"
+          } else {
+            "Updated \"${item.name}\" ($label)"
+          }
         }
-        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to recategorize item." }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to update item." }
+    }
+  }
+
+  fun addCustomCategory(name: String) {
+    val clean = name.trim()
+    if (clean.isBlank() || clean.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)) return
+    viewModelScope.launch {
+      categoryPreferences.addCustomCategory(clean)
+      _toastMessage.value = "Category \"$clean\" added."
+    }
+  }
+
+  fun deleteCustomCategory(name: String) {
+    val clean = name.trim()
+    if (clean.isBlank()) return
+    viewModelScope.launch {
+      categoryPreferences.removeCustomCategory(clean)
+      _toastMessage.value = "Removed category \"$clean\"."
+    }
+  }
+
+  fun renameTripCategory(
+    tripId: String,
+    oldCategory: String,
+    newCategory: String,
+    removingCategory: Boolean = false,
+  ) {
+    val oldClean = oldCategory.trim()
+    val newClean = newCategory.trim().ifBlank { "Essentials" }
+    if (oldClean.isBlank() || oldClean.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)) return
+    if (newClean.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)) return
+    viewModelScope.launch {
+      if (removingCategory) {
+        categoryPreferences.removeCustomCategory(oldClean)
+      } else {
+        val isNewCustom = CategoryPreferences.DEFAULT_PACKING_CATEGORIES.none {
+          it.equals(newClean, ignoreCase = true)
+        }
+        if (isNewCustom) {
+          categoryPreferences.renameCustomCategory(oldClean, newClean)
+        } else {
+          categoryPreferences.removeCustomCategory(oldClean)
+        }
+      }
+
+      repository.renameTripCategory(tripId, oldClean, newClean)
+        .onSuccess { updatedCount ->
+          _toastMessage.value = when {
+            removingCategory && updatedCount > 0 ->
+              "Removed \"$oldClean\" and moved $updatedCount item(s) to $newClean."
+            removingCategory ->
+              "Removed \"$oldClean\"."
+            updatedCount > 0 ->
+              "Updated $updatedCount item(s) from \"$oldClean\" to \"$newClean\"."
+            else ->
+              "Renamed category to \"$newClean\"."
+          }
+        }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to update category." }
+    }
+  }
+
+  fun renameVaultCategory(
+    oldCategory: String,
+    newCategory: String,
+    removingCategory: Boolean = false,
+  ) {
+    val oldClean = oldCategory.trim()
+    val newClean = newCategory.trim().ifBlank { "Essentials" }
+    if (oldClean.isBlank() || oldClean.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)) return
+    if (newClean.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)) return
+    viewModelScope.launch {
+      if (removingCategory) {
+        categoryPreferences.removeCustomCategory(oldClean)
+      } else if (CategoryPreferences.DEFAULT_PACKING_CATEGORIES.none { it.equals(newClean, ignoreCase = true) }) {
+        categoryPreferences.renameCustomCategory(oldClean, newClean)
+      } else {
+        categoryPreferences.removeCustomCategory(oldClean)
+      }
+
+      repository.renameVaultCategory(oldClean, newClean)
+        .onSuccess { updatedCount ->
+          _toastMessage.value = when {
+            removingCategory && updatedCount > 0 ->
+              "Removed \"$oldClean\" and moved $updatedCount vault item(s) to $newClean."
+            updatedCount > 0 ->
+              "Moved $updatedCount vault item(s) from \"$oldClean\" to \"$newClean\"."
+            else ->
+              "Category updated to \"$newClean\"."
+          }
+        }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to update vault category." }
     }
   }
 
@@ -1122,6 +1378,7 @@ class PackWiseViewModel(
         longitude = trip.longitude,
         startEpochDay = trip.startDateEpochDay,
         endEpochDay = trip.endDateEpochDay,
+        temperatureUnit = homeCountry.value.temperatureUnit,
       ).onSuccess { forecast ->
         repository.updateTripWeather(trip.id, forecast)
         if (forecast.alertActive && trip.weatherNotificationsEnabled) {
@@ -1240,16 +1497,33 @@ class PackWiseViewModel(
     targetType: VaultItemType,
     newCategory: String,
     newNotes: String,
+    newName: String = item.name,
+    newQuantity: Long = item.quantity,
   ) {
+    val resolvedName = newName.trim().ifBlank { item.name }
+    if (resolvedName.isBlank()) return
     viewModelScope.launch {
-      repository.recategorizeVaultItem(item, targetType, newCategory, newNotes)
+      if (targetType == VaultItemType.ALWAYS_BRING &&
+        newCategory.trim().isNotBlank() &&
+        CategoryPreferences.DEFAULT_PACKING_CATEGORIES.none { it.equals(newCategory.trim(), ignoreCase = true) }
+      ) {
+        categoryPreferences.addCustomCategory(newCategory.trim())
+      }
+      repository.recategorizeVaultItem(
+        item = item,
+        targetType = targetType,
+        newCategory = newCategory,
+        newNotes = newNotes,
+        newName = resolvedName,
+        newQuantity = newQuantity,
+      )
         .onSuccess {
           val dest = if (targetType == VaultItemType.ALWAYS_DO) {
             "Always-Do tasks"
           } else {
             "Always Bring (${newCategory.ifBlank { "Essentials" }})"
           }
-          _toastMessage.value = "Moved \"${item.name}\" to $dest"
+          _toastMessage.value = "Updated \"$resolvedName\" in $dest"
         }
         .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to update item." }
     }

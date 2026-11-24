@@ -196,6 +196,7 @@ class AiChecklistGenerator(
     dateRangeLabel: String = "",
     homeCountry: String = "",
     isInternationalOverride: Boolean? = null,
+    focusActivities: List<String> = emptyList(),
     onNanoDownloadable: (() -> Unit)? = null,
   ): Result<GeneratedChecklistResult> {
     val nanoStatus = onDeviceNanoClient.checkStatus()
@@ -210,6 +211,7 @@ class AiChecklistGenerator(
           alwaysBringNames = alwaysBringNames,
           homeCountry = homeCountry,
           isInternationalOverride = isInternationalOverride,
+          focusActivities = focusActivities,
         )
         val nanoItems = nanoResult.getOrNull()
         if (!nanoItems.isNullOrEmpty()) {
@@ -279,11 +281,17 @@ class AiChecklistGenerator(
       null -> "1. Determine whether $placeLabel is international relative to the traveler's home country ($homeBaseLine). If domestic, set isInternationalTravel=false and leave adapter/eSIM/currency fields empty \"\". If international, set isInternationalTravel=true and populate plug adapter, voltage/Hz, eSIM, currency, and entry tips."
     }
 
+    val focusActivitiesLine = if (focusActivities.isNotEmpty()) {
+      "\n      Newly Added Activities (PRIORITIZE specific gear, footwear, attire, and safety items for these): ${focusActivities.joinToString(", ")}"
+    } else {
+      ""
+    }
+
     val prompt = """
       Generate a realistic, tailored packing checklist AND destination travel guide for a trip to $placeLabel.
       Traveler Home Country: $homeBaseLine
       Trip Dates & Duration: $datesLine ($durationDays days, $nights nights)
-      Planned Activities: $activitiesLine
+      Planned Activities: $activitiesLine$focusActivitiesLine
       $weatherLine
       Planned Calendar Events: $calendarLine
       Items ALREADY in user's "Always Bring" / "Always-Do" vault (DO NOT duplicate these): $alwaysBringLine
@@ -291,7 +299,7 @@ class AiChecklistGenerator(
       Checklist Rules:
       1. Scale clothing quantities realistically to $durationDays days.
       2. Include weather-appropriate outerwear/gear matching rain probability and min/max temperatures.
-      3. Include dedicated items inspired by the planned activities, calendar events, and local/seasonal events.
+      3. Include dedicated items inspired by the planned activities${if (focusActivities.isNotEmpty()) "—especially the newly added activities (${focusActivities.joinToString(", ")})" else ""}, calendar events, and local/seasonal events.
       $internationalChecklistRule
       5. Do NOT duplicate items from the user's Always Bring / Always-Do vault above, and keep focus on travel items (12 to 22 items total).
 

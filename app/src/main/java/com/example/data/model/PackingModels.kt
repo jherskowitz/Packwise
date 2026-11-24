@@ -47,6 +47,33 @@ data class Trip(
 ) {
   val travelGuide: TravelGuideInfo?
     get() = TravelGuideInfo.fromJsonString(travelGuideJson)
+
+  fun formattedDestinationLabel(): String {
+    val dest = destination.trim()
+    val c = country.trim()
+    if (c.isBlank()) return dest
+    if (dest.endsWith(", $c", ignoreCase = true) || dest.equals(c, ignoreCase = true)) {
+      return dest
+    }
+    return "$dest, $c"
+  }
+}
+
+enum class TripSortOrder(val label: String) {
+  CHRONOLOGICAL("Chronological"),
+  RECENTLY_EDITED("Recently Edited"),
+}
+
+fun List<Trip>.sortedByOrder(sortOrder: TripSortOrder): List<Trip> = when (sortOrder) {
+  TripSortOrder.CHRONOLOGICAL -> sortedWith(
+    compareBy<Trip> { it.startDateEpochDay }
+      .thenBy { it.endDateEpochDay }
+      .thenByDescending { (it.updatedAt ?: it.createdAt)?.toDate()?.time ?: 0L }
+  )
+  TripSortOrder.RECENTLY_EDITED -> sortedWith(
+    compareByDescending<Trip> { (it.updatedAt ?: it.createdAt)?.toDate()?.time ?: 0L }
+      .thenByDescending { it.startDateEpochDay }
+  )
 }
 
 data class AttractionSuggestion(
@@ -262,9 +289,23 @@ data class DraftPackingItem(
   val sourceType: String = "ai",
 )
 
+val DEFAULT_TRIP_ACTIVITIES = listOf(
+  "City Walking",
+  "Hiking",
+  "Beach & Swim",
+  "Business Meetings",
+  "Evening Dining",
+  "Workout / Run",
+  "Photography",
+  "Cold / Snow",
+  "Camping",
+  "Formal Event",
+)
+
 data class AiItemRecommendation(
   val engineLabel: String,
   val items: List<DraftPackingItem>,
+  val focusActivities: List<String> = emptyList(),
 )
 
 data class DestinationPlace(
@@ -274,6 +315,16 @@ data class DestinationPlace(
   val latitude: Double,
   val longitude: Double,
 ) {
+  fun cityAndRegionLabel(): String {
+    val cleanCity = name.trim()
+    val cleanRegion = admin1.trim()
+    return if (cleanRegion.isNotBlank() && !cleanRegion.equals(cleanCity, ignoreCase = true)) {
+      "$cleanCity, $cleanRegion"
+    } else {
+      cleanCity
+    }
+  }
+
   fun displayLabel(): String {
     val region = listOf(admin1, country).filter { it.isNotBlank() }.distinct().joinToString(", ")
     return if (region.isNotBlank()) "$name, $region" else name

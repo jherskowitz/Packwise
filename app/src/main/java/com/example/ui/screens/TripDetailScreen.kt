@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -22,12 +23,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Checklist
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DirectionsTransit
@@ -36,6 +40,7 @@ import androidx.compose.material.icons.rounded.Event
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.material.icons.rounded.Hiking
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material.icons.rounded.Power
@@ -58,6 +63,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -87,36 +93,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.local.CategoryPreferences
 import com.example.data.local.HomeBasePreferences
 import com.example.data.local.HomeCountryPreference
 import com.example.data.local.HomeCountrySource
 import com.example.data.model.AiItemRecommendation
 import com.example.data.model.AttractionSuggestion
 import com.example.data.model.CATEGORY_ALWAYS_DO
+import com.example.data.model.DEFAULT_TRIP_ACTIVITIES
 import com.example.data.model.DraftPackingItem
 import com.example.data.model.PackingItem
 import com.example.data.model.TravelGuideInfo
 import com.example.data.model.Trip
 import com.example.data.model.TripItemScope
 import com.example.data.model.UiState
+import com.example.data.remote.WeatherRepository
 import com.example.ui.components.AiRecommendationsSheet
+import com.example.ui.components.CategorySectionHeader
 import com.example.ui.components.DestinationHeaderImage
+import com.example.ui.components.EditCategoryDialog
+import com.example.ui.components.ManageCategoriesDialog
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-
-private val TRIP_CATEGORY_PRESETS = listOf(
-  "Essentials",
-  "Clothing",
-  "Weather Gear",
-  "Footwear",
-  "Activity Gear",
-  "Tech",
-  "Toiletries",
-  "Documents",
-  "Health",
-  "Outerwear",
-)
 
 enum class ChecklistFilter(val label: String) {
   ALL("All"),
@@ -135,11 +134,23 @@ fun TripDetailScreen(
   aiRecommendationsState: UiState<AiItemRecommendation> = UiState.Idle,
   guideLoadingState: UiState<Unit> = UiState.Idle,
   homeCountry: HomeCountryPreference = HomeCountryPreference("US", "United States", HomeCountrySource.DEVICE_REGION),
+  customCategories: List<String> = emptyList(),
   onNavigateBack: () -> Unit,
   onTogglePacked: (PackingItem) -> Unit,
   onAddManualItem: (name: String, category: String, reason: String, quantity: Long, scope: TripItemScope) -> Unit,
   onDeleteItem: (String) -> Unit,
-  onRecategorizeItem: (item: PackingItem, newScope: TripItemScope, newCategory: String, saveToVault: Boolean) -> Unit,
+  onRecategorizeItem: (
+    item: PackingItem,
+    newScope: TripItemScope,
+    newCategory: String,
+    saveToVault: Boolean,
+    newName: String,
+    newQuantity: Long,
+    newReason: String,
+  ) -> Unit,
+  onAddCustomCategory: (String) -> Unit = {},
+  onRenameCategory: (oldCategory: String, newCategory: String, removing: Boolean) -> Unit = { _, _, _ -> },
+  onDeleteCustomCategory: (String) -> Unit = {},
   onRefreshWeather: () -> Unit,
   onToggleNotifications: (Boolean) -> Unit,
   onOpenGoogleTasksImport: () -> Unit,
@@ -153,12 +164,17 @@ fun TripDetailScreen(
   onDismissGuideError: () -> Unit = {},
   onAddSuggestedGuideItem: (name: String, category: String, reason: String) -> Unit = { _, _, _ -> },
   onDismissAttraction: (AttractionSuggestion) -> Unit = {},
+  onUpdateTripActivities: (updatedActivities: List<String>, newlyAdded: List<String>, fetchSuggestions: Boolean) -> Unit = { _, _, _ -> },
   onCompleteAndResetTrip: (List<PackingItem>, Boolean) -> Unit,
   onDeleteTrip: () -> Unit,
 ) {
   var activeFilter by remember { mutableStateOf(ChecklistFilter.ALL) }
   var showAddDialog by remember { mutableStateOf(false) }
+  var showAddActivityDialog by remember { mutableStateOf(false) }
   var showAiRecommendationsSheet by remember { mutableStateOf(false) }
+  var showManageCategoriesDialog by remember { mutableStateOf(false) }
+  var editingCategoryName by remember { mutableStateOf<String?>(null) }
+  var collapsedCategories by remember { mutableStateOf<Set<String>>(emptySet()) }
   var recategorizingItem by remember { mutableStateOf<PackingItem?>(null) }
   var showResetDialog by remember { mutableStateOf(false) }
   var showDeleteTripDialog by remember { mutableStateOf(false) }
@@ -172,6 +188,12 @@ fun TripDetailScreen(
   val alwaysDoCount = remember(allItems) { allItems.count { it.isAlwaysDo } }
   val alwaysBringCount = remember(allItems) { allItems.count { it.isAlwaysBring && !it.isAlwaysDo } }
   val tripSpecificCount = remember(allItems) { allItems.count { !it.isAlwaysBring && !it.isAlwaysDo } }
+  val availableCategories = remember(allItems, customCategories) {
+    CategoryPreferences.mergeAvailableCategories(
+      activeCategories = allItems.filter { !it.isAlwaysDo }.map { it.category },
+      customCategories = customCategories,
+    )
+  }
   val filteredItems = remember(allItems, activeFilter) {
     when (activeFilter) {
       ChecklistFilter.ALL -> allItems
@@ -180,6 +202,17 @@ fun TripDetailScreen(
       ChecklistFilter.ALWAYS_BRING -> allItems.filter { it.isAlwaysBring && !it.isAlwaysDo }
       ChecklistFilter.TRIP_CONTEXT -> allItems.filter { !it.isAlwaysBring && !it.isAlwaysDo }
     }
+  }
+  val groupedSections = remember(filteredItems) {
+    filteredItems
+      .groupBy { CategoryPreferences.displayCategoryFor(it) }
+      .entries
+      .sortedWith(
+        compareBy<Map.Entry<String, List<PackingItem>>> {
+          CategoryPreferences.categorySortOrder(it.key)
+        }.thenBy { it.key.lowercase(Locale.ROOT) }
+      )
+      .map { it.key to it.value }
   }
 
   Scaffold(
@@ -284,10 +317,10 @@ fun TripDetailScreen(
                     .padding(14.dp),
                 ) {
                   Text(
-                    text = if (trip.country.isNotBlank()) "${trip.destination}, ${trip.country}" else trip.destination,
+                    text = trip.formattedDestinationLabel(),
                     style = MaterialTheme.typography.titleLarge,
                     color = Color.White,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                   )
                   Text(
@@ -327,7 +360,8 @@ fun TripDetailScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                      text = trip.weatherSummary.ifBlank { "Tap Refresh for live weather" },
+                      text = WeatherRepository.formatSummaryForUnit(trip, homeCountry.temperatureUnit)
+                        .ifBlank { "Tap Refresh for live weather" },
                       style = MaterialTheme.typography.bodySmall,
                     )
                   }
@@ -343,7 +377,8 @@ fun TripDetailScreen(
                   }
                 }
 
-                if (trip.weatherAlertActive && trip.weatherAlertMessage.isNotBlank()) {
+                val displayAlert = WeatherRepository.formatAlertForUnit(trip, homeCountry.temperatureUnit)
+                if (trip.weatherAlertActive && displayAlert.isNotBlank()) {
                   Spacer(modifier = Modifier.height(6.dp))
                   Surface(
                     shape = MaterialTheme.shapes.small,
@@ -351,7 +386,7 @@ fun TripDetailScreen(
                     modifier = Modifier.fillMaxWidth(),
                   ) {
                     Text(
-                      text = trip.weatherAlertMessage,
+                      text = displayAlert,
                       style = MaterialTheme.typography.bodySmall,
                       color = MaterialTheme.colorScheme.onTertiaryContainer,
                       modifier = Modifier.padding(10.dp),
@@ -458,6 +493,21 @@ fun TripDetailScreen(
         }
 
         item {
+          PlannedActivitiesCard(
+            activities = trip.activities,
+            onAddActivityClick = { showAddActivityDialog = true },
+            onRemoveActivity = { activityToRemove ->
+              val updated = trip.activities.filterNot { it.equals(activityToRemove, ignoreCase = true) }
+              onUpdateTripActivities(updated, emptyList(), false)
+            },
+            onSuggestForActivities = {
+              showAiRecommendationsSheet = true
+              onOpenAiRecommendations(true)
+            },
+          )
+        }
+
+        item {
           val existingItemNames = remember(allItems) {
             allItems.map { it.name.trim().lowercase(Locale.ROOT) }.toSet()
           }
@@ -479,67 +529,142 @@ fun TripDetailScreen(
         }
 
         item {
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-          ) {
-            Button(
-              onClick = { showAddDialog = true },
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-              modifier = Modifier
-                .weight(1f)
-                .heightIn(min = 48.dp)
-                .testTag("detail_add_item_button"),
-            ) {
-              Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(modifier = Modifier.width(4.dp))
-              Text("Add Item", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-            OutlinedButton(
-              onClick = onOpenGoogleTasksImport,
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-              modifier = Modifier
-                .weight(1f)
-                .heightIn(min = 48.dp)
-                .testTag("detail_import_tasks_button"),
-            ) {
-              Icon(Icons.Rounded.Checklist, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(modifier = Modifier.width(4.dp))
-              Text("Import Tasks", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-            OutlinedButton(
-              onClick = { showResetDialog = true },
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-              modifier = Modifier
-                .weight(1f)
-                .heightIn(min = 48.dp)
-                .testTag("detail_reset_trip_button"),
-            ) {
-              Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(modifier = Modifier.width(4.dp))
-              Text("Reset Fresh", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+          BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val wideActions = maxWidth >= 480.dp
+            if (wideActions) {
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                Button(
+                  onClick = { showAddDialog = true },
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                  modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag("detail_add_item_button"),
+                ) {
+                  Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                  Spacer(modifier = Modifier.width(4.dp))
+                  Text("Add Item", maxLines = 1, softWrap = false)
+                }
+                OutlinedButton(
+                  onClick = onOpenGoogleTasksImport,
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                  modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag("detail_import_tasks_button"),
+                ) {
+                  Icon(Icons.Rounded.Checklist, contentDescription = null, modifier = Modifier.size(16.dp))
+                  Spacer(modifier = Modifier.width(4.dp))
+                  Text("Import Tasks", maxLines = 1, softWrap = false)
+                }
+                OutlinedButton(
+                  onClick = { showResetDialog = true },
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                  modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .testTag("detail_reset_trip_button"),
+                ) {
+                  Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                  Spacer(modifier = Modifier.width(4.dp))
+                  Text("Reset Checklist", maxLines = 1, softWrap = false)
+                }
+              }
+            } else {
+              Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                  Button(
+                    onClick = { showAddDialog = true },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    modifier = Modifier
+                      .weight(1f)
+                      .heightIn(min = 48.dp)
+                      .testTag("detail_add_item_button"),
+                  ) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Add Item", maxLines = 1, softWrap = false)
+                  }
+                  OutlinedButton(
+                    onClick = onOpenGoogleTasksImport,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    modifier = Modifier
+                      .weight(1f)
+                      .heightIn(min = 48.dp)
+                      .testTag("detail_import_tasks_button"),
+                  ) {
+                    Icon(Icons.Rounded.Checklist, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Import Tasks", maxLines = 1, softWrap = false)
+                  }
+                }
+                OutlinedButton(
+                  onClick = { showResetDialog = true },
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("detail_reset_trip_button"),
+                ) {
+                  Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                  Spacer(modifier = Modifier.width(6.dp))
+                  Text("Reset Checklist", maxLines = 1, softWrap = false)
+                }
+              }
             }
           }
         }
 
         item {
-          FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-          ) {
-            ChecklistFilter.entries.forEach { filter ->
-              val chipText = when (filter) {
-                ChecklistFilter.ALWAYS_DO -> if (alwaysDoCount > 0) "${filter.label} ($alwaysDoCount)" else filter.label
-                ChecklistFilter.ALWAYS_BRING -> if (alwaysBringCount > 0) "${filter.label} ($alwaysBringCount)" else filter.label
-                ChecklistFilter.TRIP_CONTEXT -> if (tripSpecificCount > 0) "${filter.label} ($tripSpecificCount)" else filter.label
-                else -> filter.label
+          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              ChecklistFilter.entries.forEach { filter ->
+                val chipText = when (filter) {
+                  ChecklistFilter.ALWAYS_DO -> if (alwaysDoCount > 0) "${filter.label} ($alwaysDoCount)" else filter.label
+                  ChecklistFilter.ALWAYS_BRING -> if (alwaysBringCount > 0) "${filter.label} ($alwaysBringCount)" else filter.label
+                  ChecklistFilter.TRIP_CONTEXT -> if (tripSpecificCount > 0) "${filter.label} ($tripSpecificCount)" else filter.label
+                  else -> filter.label
+                }
+                FilterChip(
+                  selected = activeFilter == filter,
+                  onClick = { activeFilter = filter },
+                  label = { Text(chipText) },
+                  modifier = Modifier.testTag("filter_${filter.name.lowercase()}"),
+                )
               }
-              FilterChip(
-                selected = activeFilter == filter,
-                onClick = { activeFilter = filter },
-                label = { Text(chipText) },
-                modifier = Modifier.testTag("filter_${filter.name.lowercase()}"),
+            }
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text(
+                text = "Grouped by Category (${groupedSections.size})",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
               )
+              TextButton(
+                onClick = { showManageCategoriesDialog = true },
+                modifier = Modifier
+                  .heightIn(min = 48.dp)
+                  .testTag("detail_manage_categories_button"),
+              ) {
+                Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Edit Categories", maxLines = 1, softWrap = false)
+              }
             }
           }
         }
@@ -567,7 +692,7 @@ fun TripDetailScreen(
             }
           }
           is UiState.Success -> {
-            if (filteredItems.isEmpty()) {
+            if (groupedSections.isEmpty()) {
               item {
                 Card(
                   shape = MaterialTheme.shapes.medium,
@@ -587,13 +712,37 @@ fun TripDetailScreen(
                 }
               }
             } else {
-              items(filteredItems, key = { it.id }) { item ->
-                PackingItemRowCard(
-                  item = item,
-                  onTogglePacked = { onTogglePacked(item) },
-                  onRecategorize = { recategorizingItem = item },
-                  onDelete = { onDeleteItem(item.id) },
-                )
+              groupedSections.forEach { (categoryName, sectionItems) ->
+                val catKey = categoryName.lowercase(Locale.ROOT)
+                val isExpanded = catKey !in collapsedCategories
+                val isAlwaysDoCategory = categoryName.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)
+                item(key = "section_header_$catKey") {
+                  CategorySectionHeader(
+                    categoryName = categoryName,
+                    packedCount = sectionItems.count { it.isPacked },
+                    totalCount = sectionItems.size,
+                    isExpanded = isExpanded,
+                    canEditCategory = !isAlwaysDoCategory,
+                    onToggleExpand = {
+                      collapsedCategories = if (isExpanded) {
+                        collapsedCategories + catKey
+                      } else {
+                        collapsedCategories - catKey
+                      }
+                    },
+                    onEditCategory = { editingCategoryName = categoryName },
+                  )
+                }
+                if (isExpanded) {
+                  items(sectionItems, key = { it.id }) { item ->
+                    PackingItemRowCard(
+                      item = item,
+                      onTogglePacked = { onTogglePacked(item) },
+                      onRecategorize = { recategorizingItem = item },
+                      onDelete = { onDeleteItem(item.id) },
+                    )
+                  }
+                }
               }
             }
           }
@@ -662,10 +811,26 @@ fun TripDetailScreen(
             )
           }
           if (selectedScope != TripItemScope.ALWAYS_DO) {
+            Text(
+              text = "Category",
+              style = MaterialTheme.typography.labelLarge,
+            )
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+              availableCategories.forEach { preset ->
+                FilterChip(
+                  selected = category.equals(preset, ignoreCase = true),
+                  onClick = { category = preset },
+                  label = { Text(preset) },
+                )
+              }
+            }
             OutlinedTextField(
               value = category,
               onValueChange = { category = it },
-              label = { Text("Category") },
+              label = { Text("Custom category") },
               singleLine = true,
               modifier = Modifier.fillMaxWidth(),
             )
@@ -719,6 +884,7 @@ fun TripDetailScreen(
   }
 
   recategorizingItem?.let { item ->
+    var itemName by remember(item.id) { mutableStateOf(item.name) }
     var selectedScope by remember(item.id) { mutableStateOf(item.scope) }
     var category by remember(item.id) {
       mutableStateOf(
@@ -729,13 +895,46 @@ fun TripDetailScreen(
         }
       )
     }
+    var qtyText by remember(item.id) { mutableStateOf(item.quantity.coerceIn(1L, 99L).toString()) }
+    var reasonText by remember(item.id) { mutableStateOf(item.contextReason) }
     var saveToVault by remember(item.id) { mutableStateOf(true) }
 
     AlertDialog(
       onDismissRequest = { recategorizingItem = null },
-      title = { Text("Recategorize \"${item.name}\"") },
+      title = {
+        Text(
+          if (selectedScope == TripItemScope.ALWAYS_DO) "Edit Task" else "Edit Item"
+        )
+      },
       text = {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+          modifier = Modifier.verticalScroll(rememberScrollState()),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          OutlinedTextField(
+            value = itemName,
+            onValueChange = { itemName = it },
+            label = {
+              Text(if (selectedScope == TripItemScope.ALWAYS_DO) "Task name" else "Item name")
+            },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("edit_item_name_input"),
+          )
+
+          if (selectedScope != TripItemScope.ALWAYS_DO) {
+            OutlinedTextField(
+              value = qtyText,
+              onValueChange = { qtyText = it.filter { ch -> ch.isDigit() } },
+              label = { Text("Quantity") },
+              singleLine = true,
+              modifier = Modifier
+                .fillMaxWidth()
+                .testTag("edit_item_qty_input"),
+            )
+          }
+
           Text(
             text = "List Group",
             style = MaterialTheme.typography.labelLarge,
@@ -763,7 +962,7 @@ fun TripDetailScreen(
 
           if (selectedScope == TripItemScope.ALWAYS_DO) {
             Text(
-              text = "Moved to the Always-Do category for pre-departure home tasks (before you leave).",
+              text = "Grouped under the Always-Do category for pre-departure home tasks (before you leave).",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -776,7 +975,7 @@ fun TripDetailScreen(
               horizontalArrangement = Arrangement.spacedBy(6.dp),
               verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-              TRIP_CATEGORY_PRESETS.forEach { preset ->
+              availableCategories.forEach { preset ->
                 FilterChip(
                   selected = category.equals(preset, ignoreCase = true),
                   onClick = { category = preset },
@@ -792,6 +991,16 @@ fun TripDetailScreen(
               modifier = Modifier.fillMaxWidth(),
             )
           }
+
+          OutlinedTextField(
+            value = reasonText,
+            onValueChange = { reasonText = it },
+            label = { Text("Notes / Reason") },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("edit_item_reason_input"),
+          )
 
           if (selectedScope == TripItemScope.ALWAYS_BRING || selectedScope == TripItemScope.ALWAYS_DO) {
             Row(
@@ -820,9 +1029,13 @@ fun TripDetailScreen(
               selectedScope,
               if (selectedScope == TripItemScope.ALWAYS_DO) CATEGORY_ALWAYS_DO else category.ifBlank { "Essentials" },
               saveToVault && selectedScope != TripItemScope.TRIP_SPECIFIC,
+              itemName.trim(),
+              qtyText.toLongOrNull()?.coerceIn(1L, 99L) ?: 1L,
+              reasonText,
             )
             recategorizingItem = null
           },
+          enabled = itemName.isNotBlank(),
           modifier = Modifier.testTag("confirm_recategorize_item_button"),
         ) {
           Text("Save")
@@ -910,6 +1123,165 @@ fun TripDetailScreen(
       onDismissItem = onDismissRecommendedItem,
       onClearError = onClearAiRecommendationsError,
       onDismissSheet = { showAiRecommendationsSheet = false },
+    )
+  }
+
+  if (showAddActivityDialog) {
+    var customActivity by remember { mutableStateOf("") }
+    var selectedPresets by remember(trip.id, showAddActivityDialog) {
+      mutableStateOf<Set<String>>(emptySet())
+    }
+    var autoSuggest by remember(trip.id, showAddActivityDialog) { mutableStateOf(true) }
+    val existingLower = remember(trip.activities) {
+      trip.activities.map { it.trim().lowercase(Locale.ROOT) }.toSet()
+    }
+    val remainingPresets = remember(existingLower) {
+      DEFAULT_TRIP_ACTIVITIES.filter { it.lowercase(Locale.ROOT) !in existingLower }
+    }
+
+    AlertDialog(
+      onDismissRequest = { showAddActivityDialog = false },
+      title = { Text("Add Trip Activity") },
+      text = {
+        Column(
+          modifier = Modifier.verticalScroll(rememberScrollState()),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Text(
+            text = "Add activities to ${trip.destination} to get tailored packing suggestions.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          OutlinedTextField(
+            value = customActivity,
+            onValueChange = { customActivity = it },
+            label = { Text("Custom activity") },
+            placeholder = { Text("e.g., Scuba diving, Skiing, Concert") },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("detail_activity_input"),
+          )
+          if (remainingPresets.isNotEmpty()) {
+            Text(
+              text = "Quick-Pick Activities",
+              style = MaterialTheme.typography.labelLarge,
+            )
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+              remainingPresets.forEach { preset ->
+                val isSelected = preset in selectedPresets
+                FilterChip(
+                  selected = isSelected,
+                  onClick = {
+                    selectedPresets = if (isSelected) {
+                      selectedPresets - preset
+                    } else {
+                      selectedPresets + preset
+                    }
+                  },
+                  label = { Text(preset) },
+                )
+              }
+            }
+          }
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(
+              text = "Get packing suggestions for added activities",
+              style = MaterialTheme.typography.bodySmall,
+              modifier = Modifier.weight(1f),
+            )
+            Switch(
+              checked = autoSuggest,
+              onCheckedChange = { autoSuggest = it },
+              modifier = Modifier.testTag("detail_activity_autosuggest_switch"),
+            )
+          }
+        }
+      },
+      confirmButton = {
+        val hasNewInput = customActivity.isNotBlank() || selectedPresets.isNotEmpty()
+        Button(
+          onClick = {
+            val newlyAdded = (selectedPresets.toList() + listOf(customActivity.trim()))
+              .map { it.trim() }
+              .filter { it.isNotBlank() && it.lowercase(Locale.ROOT) !in existingLower }
+              .distinctBy { it.lowercase(Locale.ROOT) }
+            if (newlyAdded.isNotEmpty()) {
+              val updated = (trip.activities + newlyAdded).take(15)
+              onUpdateTripActivities(updated, newlyAdded, autoSuggest)
+              showAddActivityDialog = false
+              if (autoSuggest) {
+                showAiRecommendationsSheet = true
+              }
+            } else {
+              showAddActivityDialog = false
+            }
+          },
+          enabled = hasNewInput,
+          modifier = Modifier.testTag("confirm_add_activity_button"),
+        ) {
+          Text(if (autoSuggest) "Add & Suggest" else "Add Activity")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showAddActivityDialog = false }) {
+          Text("Cancel")
+        }
+      },
+    )
+  }
+
+  if (showManageCategoriesDialog) {
+    val activeCounts = remember(allItems, availableCategories) {
+      val countsMap = allItems
+        .groupBy { CategoryPreferences.displayCategoryFor(it) }
+        .mapValues { it.value.size }
+      val allNames = buildList {
+        if ((countsMap[CATEGORY_ALWAYS_DO] ?: 0) > 0) add(CATEGORY_ALWAYS_DO)
+        availableCategories.forEach { add(it) }
+      }
+      allNames.distinctBy { it.lowercase(Locale.ROOT) }.map { name ->
+        val matchedCount = countsMap.entries
+          .firstOrNull { it.key.equals(name, ignoreCase = true) }
+          ?.value ?: 0
+        name to matchedCount
+      }
+    }
+    ManageCategoriesDialog(
+      categoryCounts = activeCounts,
+      customCategories = customCategories,
+      onAddCustomCategory = onAddCustomCategory,
+      onEditCategory = { catName ->
+        showManageCategoriesDialog = false
+        editingCategoryName = catName
+      },
+      onDeleteCustomCategory = onDeleteCustomCategory,
+      onDismiss = { showManageCategoriesDialog = false },
+    )
+  }
+
+  editingCategoryName?.let { targetCat ->
+    val itemCount = allItems.count {
+      !it.isAlwaysDo && CategoryPreferences.displayCategoryFor(it).equals(targetCat, ignoreCase = true)
+    }
+    EditCategoryDialog(
+      categoryName = targetCat,
+      itemCount = itemCount,
+      availableTargets = availableCategories,
+      onRenameOrMove = { newCat ->
+        onRenameCategory(targetCat, newCat, false)
+      },
+      onRemoveCategory = { fallback ->
+        onRenameCategory(targetCat, fallback, true)
+      },
+      onDismiss = { editingCategoryName = null },
     )
   }
 }
@@ -1030,7 +1402,7 @@ private fun PackingItemRowCard(
       ) {
         Icon(
           Icons.Rounded.Edit,
-          contentDescription = "Recategorize ${item.name}",
+          contentDescription = "Edit ${item.name}",
           tint = MaterialTheme.colorScheme.primary,
         )
       }
@@ -1627,6 +1999,103 @@ private fun GuidePrepRow(
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(actionLabel, maxLines = 1, softWrap = false)
+      }
+    }
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PlannedActivitiesCard(
+  activities: List<String>,
+  onAddActivityClick: () -> Unit,
+  onRemoveActivity: (String) -> Unit,
+  onSuggestForActivities: () -> Unit,
+) {
+  Card(
+    shape = MaterialTheme.shapes.large,
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    modifier = Modifier
+      .fillMaxWidth()
+      .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.large)
+      .testTag("planned_activities_card"),
+  ) {
+    Column(
+      modifier = Modifier.padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          modifier = Modifier.weight(1f),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Hiking,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(
+            text = "Planned Activities",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
+        TextButton(
+          onClick = onAddActivityClick,
+          modifier = Modifier
+            .heightIn(min = 48.dp)
+            .testTag("detail_add_activity_button"),
+        ) {
+          Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(4.dp))
+          Text("Add Activity", maxLines = 1, softWrap = false)
+        }
+      }
+
+      if (activities.isEmpty()) {
+        Text(
+          text = "No activities added yet. Add activities like Hiking, Beach & Swim, or Formal Event to receive extra packing suggestions.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      } else {
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          activities.forEach { activity ->
+            InputChip(
+              selected = true,
+              onClick = { onRemoveActivity(activity) },
+              label = { Text(activity) },
+              trailingIcon = {
+                Icon(
+                  imageVector = Icons.Rounded.Close,
+                  contentDescription = "Remove $activity",
+                  modifier = Modifier.size(16.dp),
+                )
+              },
+              modifier = Modifier.testTag("trip_activity_chip_$activity"),
+            )
+          }
+        }
+        OutlinedButton(
+          onClick = onSuggestForActivities,
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+          modifier = Modifier
+            .heightIn(min = 48.dp)
+            .testTag("detail_suggest_for_activities_button"),
+        ) {
+          Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text("Suggest Gear for Activities", maxLines = 1, softWrap = false)
+        }
       }
     }
   }

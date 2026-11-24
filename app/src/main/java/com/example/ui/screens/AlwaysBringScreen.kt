@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Checklist
@@ -54,9 +56,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.local.CategoryPreferences
 import com.example.data.model.AlwaysBringItem
+import com.example.data.model.CATEGORY_ALWAYS_DO
 import com.example.data.model.UiState
 import com.example.data.model.VaultItemType
+import com.example.ui.components.CategorySectionHeader
+import com.example.ui.components.EditCategoryDialog
+import com.example.ui.components.ManageCategoriesDialog
+import java.util.Locale
 
 private val ALWAYS_DO_SUGGESTIONS = listOf(
   "Empty the trash",
@@ -67,35 +75,56 @@ private val ALWAYS_DO_SUGGESTIONS = listOf(
   "Take out recycling",
 )
 
-private val VAULT_BRING_CATEGORIES = listOf(
-  "Essentials",
-  "Documents",
-  "Tech",
-  "Toiletries",
-  "Health",
-  "Clothing",
-  "Other",
-)
-
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AlwaysBringScreen(
   alwaysBringState: UiState<List<AlwaysBringItem>>,
+  customCategories: List<String> = emptyList(),
   onAddAlwaysBring: (name: String, category: String, quantity: Long, notes: String) -> Unit,
   onAddAlwaysDoTask: (name: String, notes: String) -> Unit,
-  onRecategorizeVaultItem: (item: AlwaysBringItem, targetType: VaultItemType, category: String, notes: String) -> Unit,
+  onRecategorizeVaultItem: (
+    item: AlwaysBringItem,
+    targetType: VaultItemType,
+    category: String,
+    notes: String,
+    newName: String,
+    newQuantity: Long,
+  ) -> Unit,
+  onAddCustomCategory: (String) -> Unit = {},
+  onRenameVaultCategory: (oldCategory: String, newCategory: String, removing: Boolean) -> Unit = { _, _, _ -> },
+  onDeleteCustomCategory: (String) -> Unit = {},
   onDeleteAlwaysBring: (String) -> Unit,
   onImportGoogleTasks: (VaultItemType) -> Unit,
 ) {
   var activeTab by remember { mutableStateOf(VaultItemType.ALWAYS_BRING) }
   var showAddBringDialog by remember { mutableStateOf(false) }
   var showAddDoDialog by remember { mutableStateOf(false) }
+  var showManageCategoriesDialog by remember { mutableStateOf(false) }
+  var editingCategoryName by remember { mutableStateOf<String?>(null) }
+  var collapsedCategories by remember { mutableStateOf<Set<String>>(emptySet()) }
   var editingItem by remember { mutableStateOf<AlwaysBringItem?>(null) }
 
   val allVaultItems = (alwaysBringState as? UiState.Success)?.data.orEmpty()
   val bringItems = remember(allVaultItems) { allVaultItems.filter { !it.isAlwaysDo } }
   val doItems = remember(allVaultItems) { allVaultItems.filter { it.isAlwaysDo } }
   val displayedItems = if (activeTab == VaultItemType.ALWAYS_BRING) bringItems else doItems
+  val availableCategories = remember(bringItems, customCategories) {
+    CategoryPreferences.mergeAvailableCategories(
+      activeCategories = bringItems.map { it.category },
+      customCategories = customCategories,
+    )
+  }
+  val groupedBringSections = remember(bringItems) {
+    bringItems
+      .groupBy { it.category.trim().ifBlank { "Essentials" } }
+      .entries
+      .sortedWith(
+        compareBy<Map.Entry<String, List<AlwaysBringItem>>> {
+          CategoryPreferences.categorySortOrder(it.key)
+        }.thenBy { it.key.lowercase(Locale.ROOT) }
+      )
+      .map { it.key to it.value }
+  }
 
   Box(
     modifier = Modifier.fillMaxSize(),
@@ -306,53 +335,87 @@ fun AlwaysBringScreen(
                 }
               }
             }
-          } else {
-            items(displayedItems, key = { it.id }) { item ->
-              Card(
-                shape = MaterialTheme.shapes.medium,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
+          } else if (activeTab == VaultItemType.ALWAYS_BRING) {
+            item {
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
               ) {
-                Row(
+                Text(
+                  text = "Categories (${groupedBringSections.size})",
+                  style = MaterialTheme.typography.titleMedium,
+                  fontWeight = FontWeight.SemiBold,
+                )
+                TextButton(
+                  onClick = { showManageCategoriesDialog = true },
                   modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                  verticalAlignment = Alignment.CenterVertically,
+                    .heightIn(min = 48.dp)
+                    .testTag("vault_manage_categories_button"),
                 ) {
-                  Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                      text = if (!item.isAlwaysDo && item.quantity > 1L) "${item.name} ×${item.quantity}" else item.name,
-                      style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                    )
-                    Text(
-                      text = "${item.category} · ${item.notes}",
-                      style = MaterialTheme.typography.bodySmall,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                  }
-                  IconButton(
-                    onClick = { editingItem = item },
-                    modifier = Modifier.testTag("recategorize_vault_${item.id}"),
-                  ) {
-                    Icon(
-                      Icons.Rounded.Edit,
-                      contentDescription = "Recategorize ${item.name}",
-                      tint = MaterialTheme.colorScheme.primary,
-                    )
-                  }
-                  IconButton(
-                    onClick = { onDeleteAlwaysBring(item.id) },
-                    modifier = Modifier.testTag("delete_always_bring_${item.id}"),
-                  ) {
-                    Icon(
-                      Icons.Rounded.DeleteOutline,
-                      contentDescription = "Remove ${item.name}",
-                      tint = MaterialTheme.colorScheme.error,
-                    )
-                  }
+                  Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                  Spacer(modifier = Modifier.width(6.dp))
+                  Text("Edit Categories", maxLines = 1, softWrap = false)
                 }
+              }
+            }
+            groupedBringSections.forEach { (categoryName, sectionItems) ->
+              val catKey = categoryName.lowercase(Locale.ROOT)
+              val isExpanded = catKey !in collapsedCategories
+              item(key = "vault_section_$catKey") {
+                CategorySectionHeader(
+                  categoryName = categoryName,
+                  packedCount = null,
+                  totalCount = sectionItems.size,
+                  isExpanded = isExpanded,
+                  canEditCategory = true,
+                  onToggleExpand = {
+                    collapsedCategories = if (isExpanded) {
+                      collapsedCategories + catKey
+                    } else {
+                      collapsedCategories - catKey
+                    }
+                  },
+                  onEditCategory = { editingCategoryName = categoryName },
+                )
+              }
+              if (isExpanded) {
+                items(sectionItems, key = { it.id }) { item ->
+                  VaultItemCard(
+                    item = item,
+                    onEdit = { editingItem = item },
+                    onDelete = { onDeleteAlwaysBring(item.id) },
+                  )
+                }
+              }
+            }
+          } else {
+            val doKey = CATEGORY_ALWAYS_DO.lowercase(Locale.ROOT)
+            val isDoExpanded = doKey !in collapsedCategories
+            item(key = "vault_section_$doKey") {
+              CategorySectionHeader(
+                categoryName = CATEGORY_ALWAYS_DO,
+                packedCount = null,
+                totalCount = displayedItems.size,
+                isExpanded = isDoExpanded,
+                canEditCategory = false,
+                onToggleExpand = {
+                  collapsedCategories = if (isDoExpanded) {
+                    collapsedCategories + doKey
+                  } else {
+                    collapsedCategories - doKey
+                  }
+                },
+                onEditCategory = {},
+              )
+            }
+            if (isDoExpanded) {
+              items(displayedItems, key = { it.id }) { item ->
+                VaultItemCard(
+                  item = item,
+                  onEdit = { editingItem = item },
+                  onDelete = { onDeleteAlwaysBring(item.id) },
+                )
               }
             }
           }
@@ -383,10 +446,26 @@ fun AlwaysBringScreen(
               .fillMaxWidth()
               .testTag("always_bring_name_input"),
           )
+          Text(
+            text = "Category",
+            style = MaterialTheme.typography.labelLarge,
+          )
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            availableCategories.forEach { cat ->
+              FilterChip(
+                selected = category.equals(cat, ignoreCase = true),
+                onClick = { category = cat },
+                label = { Text(cat) },
+              )
+            }
+          }
           OutlinedTextField(
             value = category,
             onValueChange = { category = it },
-            label = { Text("Category") },
+            label = { Text("Custom category") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
           )
@@ -490,19 +569,52 @@ fun AlwaysBringScreen(
   }
 
   editingItem?.let { item ->
+    var itemName by remember(item.id) { mutableStateOf(item.name) }
     var selectedType by remember(item.id) {
       mutableStateOf(if (item.isAlwaysDo) VaultItemType.ALWAYS_DO else VaultItemType.ALWAYS_BRING)
     }
     var category by remember(item.id) {
       mutableStateOf(if (item.isAlwaysDo) "Essentials" else item.category.ifBlank { "Essentials" })
     }
+    var qtyText by remember(item.id) { mutableStateOf(item.quantity.coerceIn(1L, 99L).toString()) }
     var notes by remember(item.id) { mutableStateOf(item.notes) }
 
     AlertDialog(
       onDismissRequest = { editingItem = null },
-      title = { Text("Recategorize \"${item.name}\"") },
+      title = {
+        Text(
+          if (selectedType == VaultItemType.ALWAYS_DO) "Edit Vault Task" else "Edit Vault Item"
+        )
+      },
       text = {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+          modifier = Modifier.verticalScroll(rememberScrollState()),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          OutlinedTextField(
+            value = itemName,
+            onValueChange = { itemName = it },
+            label = {
+              Text(if (selectedType == VaultItemType.ALWAYS_DO) "Task name" else "Item name")
+            },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("edit_vault_item_name_input"),
+          )
+
+          if (selectedType == VaultItemType.ALWAYS_BRING) {
+            OutlinedTextField(
+              value = qtyText,
+              onValueChange = { qtyText = it.filter { ch -> ch.isDigit() } },
+              label = { Text("Quantity") },
+              singleLine = true,
+              modifier = Modifier
+                .fillMaxWidth()
+                .testTag("edit_vault_item_qty_input"),
+            )
+          }
+
           Text(
             text = "Choose Vault Section",
             style = MaterialTheme.typography.labelLarge,
@@ -534,7 +646,7 @@ fun AlwaysBringScreen(
               horizontalArrangement = Arrangement.spacedBy(6.dp),
               verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-              VAULT_BRING_CATEGORIES.forEach { cat ->
+              availableCategories.forEach { cat ->
                 FilterChip(
                   selected = category.equals(cat, ignoreCase = true),
                   onClick = { category = cat },
@@ -569,9 +681,17 @@ fun AlwaysBringScreen(
       confirmButton = {
         Button(
           onClick = {
-            onRecategorizeVaultItem(item, selectedType, category, notes)
+            onRecategorizeVaultItem(
+              item,
+              selectedType,
+              category,
+              notes,
+              itemName.trim(),
+              qtyText.toLongOrNull()?.coerceIn(1L, 99L) ?: 1L,
+            )
             editingItem = null
           },
+          enabled = itemName.isNotBlank(),
           modifier = Modifier.testTag("confirm_recategorize_vault_button"),
         ) {
           Text("Save Changes")
@@ -583,5 +703,102 @@ fun AlwaysBringScreen(
         }
       },
     )
+  }
+
+  if (showManageCategoriesDialog) {
+    val activeCounts = remember(bringItems, availableCategories) {
+      val countsMap = bringItems
+        .groupBy { it.category.trim().ifBlank { "Essentials" } }
+        .mapValues { it.value.size }
+      availableCategories.map { name ->
+        val matchedCount = countsMap.entries
+          .firstOrNull { it.key.equals(name, ignoreCase = true) }
+          ?.value ?: 0
+        name to matchedCount
+      }
+    }
+    ManageCategoriesDialog(
+      categoryCounts = activeCounts,
+      customCategories = customCategories,
+      onAddCustomCategory = onAddCustomCategory,
+      onEditCategory = { catName ->
+        showManageCategoriesDialog = false
+        editingCategoryName = catName
+      },
+      onDeleteCustomCategory = onDeleteCustomCategory,
+      onDismiss = { showManageCategoriesDialog = false },
+    )
+  }
+
+  editingCategoryName?.let { targetCat ->
+    val itemCount = bringItems.count {
+      it.category.trim().ifBlank { "Essentials" }.equals(targetCat, ignoreCase = true)
+    }
+    EditCategoryDialog(
+      categoryName = targetCat,
+      itemCount = itemCount,
+      availableTargets = availableCategories,
+      onRenameOrMove = { newCat ->
+        onRenameVaultCategory(targetCat, newCat, false)
+      },
+      onRemoveCategory = { fallback ->
+        onRenameVaultCategory(targetCat, fallback, true)
+      },
+      onDismiss = { editingCategoryName = null },
+    )
+  }
+}
+
+@Composable
+private fun VaultItemCard(
+  item: AlwaysBringItem,
+  onEdit: () -> Unit,
+  onDelete: () -> Unit,
+) {
+  Card(
+    shape = MaterialTheme.shapes.medium,
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    modifier = Modifier
+      .fillMaxWidth()
+      .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
+  ) {
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 14.dp, vertical = 10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Column(modifier = Modifier.weight(1f)) {
+        Text(
+          text = if (!item.isAlwaysDo && item.quantity > 1L) "${item.name} ×${item.quantity}" else item.name,
+          style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+        )
+        Text(
+          text = "${item.category} · ${item.notes}",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      IconButton(
+        onClick = onEdit,
+        modifier = Modifier.testTag("recategorize_vault_${item.id}"),
+      ) {
+        Icon(
+          Icons.Rounded.Edit,
+          contentDescription = "Edit ${item.name}",
+          tint = MaterialTheme.colorScheme.primary,
+        )
+      }
+      IconButton(
+        onClick = onDelete,
+        modifier = Modifier.testTag("delete_always_bring_${item.id}"),
+      ) {
+        Icon(
+          Icons.Rounded.DeleteOutline,
+          contentDescription = "Remove ${item.name}",
+          tint = MaterialTheme.colorScheme.error,
+        )
+      }
+    }
   }
 }

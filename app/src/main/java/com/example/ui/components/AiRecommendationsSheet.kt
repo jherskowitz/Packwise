@@ -68,6 +68,7 @@ fun AiRecommendationsSheet(
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val recommendedItems = (recommendationsState as? UiState.Success)?.data?.items.orEmpty()
   val engineLabel = (recommendationsState as? UiState.Success)?.data?.engineLabel.orEmpty()
+  val focusActivities = (recommendationsState as? UiState.Success)?.data?.focusActivities.orEmpty()
 
   var selectedKeys by remember(recommendationsState) {
     mutableStateOf<Set<String>>(emptySet())
@@ -105,7 +106,11 @@ fun AiRecommendationsSheet(
             style = MaterialTheme.typography.titleLarge,
           )
           Text(
-            text = "Review suggestions for $destination and pick what to add",
+            text = if (focusActivities.isNotEmpty()) {
+              "Tailored for ${focusActivities.joinToString(", ")} in $destination"
+            } else {
+              "Review suggestions for $destination and pick what to add"
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )

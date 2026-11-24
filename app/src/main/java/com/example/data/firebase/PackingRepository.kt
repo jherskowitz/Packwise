@@ -288,7 +288,10 @@ class PackingRepository(
           count++
         }
       }
-      if (count > 0) batch.commit().await()
+      if (count > 0) {
+        batch.update(tripsCol(uid).document(tripId), "updatedAt", FieldValue.serverTimestamp())
+        batch.commit().await()
+      }
       Result.success(count)
     } catch (e: CancellationException) {
       throw e
@@ -304,12 +307,16 @@ class PackingRepository(
       val uid = requireUserId()
       val docRef = tripItemsCol(uid, tripId).document(itemId)
       path = docRef.path
-      docRef.update(
+      val batch = db.batch()
+      batch.update(
+        docRef,
         mapOf(
           "isPacked" to isPacked,
           "updatedAt" to FieldValue.serverTimestamp(),
         )
-      ).await()
+      )
+      batch.update(tripsCol(uid).document(tripId), "updatedAt", FieldValue.serverTimestamp())
+      batch.commit().await()
       Result.success(Unit)
     } catch (e: CancellationException) {
       throw e
@@ -325,7 +332,10 @@ class PackingRepository(
       val uid = requireUserId()
       val docRef = tripItemsCol(uid, tripId).document(itemId)
       path = docRef.path
-      docRef.delete().await()
+      val batch = db.batch()
+      batch.delete(docRef)
+      batch.update(tripsCol(uid).document(tripId), "updatedAt", FieldValue.serverTimestamp())
+      batch.commit().await()
       Result.success(Unit)
     } catch (e: CancellationException) {
       throw e
@@ -425,11 +435,18 @@ class PackingRepository(
     newScope: TripItemScope,
     newCategory: String,
     saveToVault: Boolean,
+    newName: String = item.name,
+    newQuantity: Long = item.quantity,
+    newReason: String = item.contextReason,
   ): Result<Unit> {
     var path = "users/${auth.currentUser?.uid ?: "unauthenticated"}/trips/$tripId/items/${item.id}"
     return try {
       val uid = requireUserId()
       require(tripId.isNotBlank() && item.id.isNotBlank()) { "Trip ID and Item ID are required." }
+
+      val resolvedName = newName.trim().ifBlank { item.name }.take(120)
+      require(resolvedName.isNotBlank()) { "Item name is required." }
+      val resolvedQuantity = if (newScope == TripItemScope.ALWAYS_DO) 1L else newQuantity.coerceIn(1L, 99L)
 
       val resolvedCategory = when (newScope) {
         TripItemScope.ALWAYS_DO -> CATEGORY_ALWAYS_DO
@@ -445,14 +462,15 @@ class PackingRepository(
           item.sourceType.ifBlank { "manual" }
         }
       }
+      val trimmedReason = newReason.trim()
       val resolvedReason = when {
         newScope == TripItemScope.ALWAYS_DO &&
-          (item.contextReason.isBlank() || item.contextReason == "Always Bring essential") ->
+          (trimmedReason.isBlank() || trimmedReason == "Always Bring essential") ->
           "Before leaving home on every trip"
         newScope == TripItemScope.ALWAYS_BRING &&
-          (item.contextReason.isBlank() || item.contextReason == "Before leaving home") ->
+          (trimmedReason.isBlank() || trimmedReason == "Before leaving home" || trimmedReason == "Before leaving home on every trip") ->
           "Always Bring essential"
-        else -> item.contextReason
+        else -> trimmedReason
       }.take(200)
 
       val itemRef = tripItemsCol(uid, tripId).document(item.id)
@@ -462,6 +480,8 @@ class PackingRepository(
       batch.update(
         itemRef,
         mapOf(
+          "name" to resolvedName,
+          "quantity" to resolvedQuantity,
           "category" to resolvedCategory,
           "isAlwaysBring" to resolvedIsAlwaysBring,
           "sourceType" to resolvedSourceType,
@@ -474,16 +494,24 @@ class PackingRepository(
         val vaultTargetSource = if (newScope == TripItemScope.ALWAYS_DO) SOURCE_ALWAYS_DO else "custom"
         val existingVaultDoc = withTimeoutOrNull(2_000L) {
           alwaysBringCol(uid).whereEqualTo("name", item.name).limit(1).get().await().documents.firstOrNull()
+            ?: if (!resolvedName.equals(item.name, ignoreCase = false)) {
+              alwaysBringCol(uid).whereEqualTo("name", resolvedName).limit(1).get().await().documents.firstOrNull()
+            } else {
+              null
+            }
         }
+        val vaultNotes = resolvedReason.ifBlank {
+          if (newScope == TripItemScope.ALWAYS_DO) "Before leaving home on every trip" else "Always bring on every trip"
+        }.take(200)
         if (existingVaultDoc != null) {
           batch.update(
             existingVaultDoc.reference,
             mapOf(
+              "name" to resolvedName,
+              "quantity" to resolvedQuantity,
               "category" to resolvedCategory,
               "source" to vaultTargetSource,
-              "notes" to resolvedReason.ifBlank {
-                if (newScope == TripItemScope.ALWAYS_DO) "Before leaving home on every trip" else "Always bring on every trip"
-              }.take(200),
+              "notes" to vaultNotes,
               "updatedAt" to FieldValue.serverTimestamp(),
             )
           )
@@ -493,12 +521,10 @@ class PackingRepository(
             abRef,
             mapOf(
               "userId" to uid,
-              "name" to item.name.trim().take(120),
+              "name" to resolvedName,
               "category" to resolvedCategory,
-              "quantity" to if (newScope == TripItemScope.ALWAYS_DO) 1L else item.quantity.coerceIn(1L, 99L),
-              "notes" to resolvedReason.ifBlank {
-                if (newScope == TripItemScope.ALWAYS_DO) "Before leaving home on every trip" else "Always bring on every trip"
-              }.take(200),
+              "quantity" to resolvedQuantity,
+              "notes" to vaultNotes,
               "source" to vaultTargetSource,
               "createdAt" to FieldValue.serverTimestamp(),
               "updatedAt" to FieldValue.serverTimestamp(),
@@ -507,6 +533,7 @@ class PackingRepository(
         }
       }
 
+      batch.update(tripsCol(uid).document(tripId), "updatedAt", FieldValue.serverTimestamp())
       batch.commit().await()
       Result.success(Unit)
     } catch (e: CancellationException) {
@@ -522,6 +549,8 @@ class PackingRepository(
     targetType: VaultItemType,
     newCategory: String,
     newNotes: String,
+    newName: String = item.name,
+    newQuantity: Long = item.quantity,
   ): Result<Unit> {
     var path = "users/${auth.currentUser?.uid ?: "unauthenticated"}/alwaysBring/${item.id}"
     return try {
@@ -529,6 +558,10 @@ class PackingRepository(
       require(item.id.isNotBlank()) { "Vault item ID must not be blank" }
       val docRef = alwaysBringCol(uid).document(item.id)
       path = docRef.path
+
+      val resolvedName = newName.trim().ifBlank { item.name }.take(120)
+      require(resolvedName.isNotBlank()) { "Item name is required." }
+      val resolvedQuantity = if (targetType == VaultItemType.ALWAYS_DO) 1L else newQuantity.coerceIn(1L, 99L)
 
       val resolvedCategory = when (targetType) {
         VaultItemType.ALWAYS_DO -> CATEGORY_ALWAYS_DO
@@ -546,6 +579,8 @@ class PackingRepository(
 
       docRef.update(
         mapOf(
+          "name" to resolvedName,
+          "quantity" to resolvedQuantity,
           "category" to resolvedCategory,
           "source" to resolvedSource,
           "notes" to resolvedNotes,
@@ -571,6 +606,8 @@ class PackingRepository(
                 syncBatch.update(
                   itemDoc.reference,
                   mapOf(
+                    "name" to resolvedName,
+                    "quantity" to resolvedQuantity,
                     "category" to resolvedCategory,
                     "isAlwaysBring" to (targetType == VaultItemType.ALWAYS_BRING),
                     "sourceType" to if (targetType == VaultItemType.ALWAYS_DO) SOURCE_ALWAYS_DO else SOURCE_ALWAYS_BRING,
@@ -590,6 +627,94 @@ class PackingRepository(
       throw e
     } catch (e: Exception) {
       handleFirestoreError(e, OperationType.UPDATE, path, auth)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun renameTripCategory(
+    tripId: String,
+    oldCategory: String,
+    newCategory: String,
+  ): Result<Int> {
+    val oldClean = oldCategory.trim()
+    val newClean = newCategory.trim().take(60)
+    if (oldClean.isBlank() || newClean.isBlank() || oldClean.equals(newClean, ignoreCase = true)) {
+      return Result.success(0)
+    }
+    var path = "users/${auth.currentUser?.uid ?: "unauthenticated"}/trips/$tripId/items"
+    return try {
+      val uid = requireUserId()
+      val snap = tripItemsCol(uid, tripId).get().await()
+      val matches = snap.documents.filter { doc ->
+        val src = doc.getString("sourceType").orEmpty()
+        val cat = doc.getString("category").orEmpty().trim().ifBlank { "Essentials" }
+        src != SOURCE_ALWAYS_DO &&
+          !cat.equals(CATEGORY_ALWAYS_DO, ignoreCase = true) &&
+          cat.equals(oldClean, ignoreCase = true)
+      }
+      if (matches.isEmpty()) return Result.success(0)
+
+      val batch = db.batch()
+      matches.forEach { doc ->
+        path = doc.reference.path
+        batch.update(
+          doc.reference,
+          mapOf(
+            "category" to newClean,
+            "updatedAt" to FieldValue.serverTimestamp(),
+          )
+        )
+      }
+      batch.update(tripsCol(uid).document(tripId), "updatedAt", FieldValue.serverTimestamp())
+      batch.commit().await()
+      Result.success(matches.size)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.WRITE, path, auth)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun renameVaultCategory(
+    oldCategory: String,
+    newCategory: String,
+  ): Result<Int> {
+    val oldClean = oldCategory.trim()
+    val newClean = newCategory.trim().take(60)
+    if (oldClean.isBlank() || newClean.isBlank() || oldClean.equals(newClean, ignoreCase = true)) {
+      return Result.success(0)
+    }
+    var path = "users/${auth.currentUser?.uid ?: "unauthenticated"}/alwaysBring"
+    return try {
+      val uid = requireUserId()
+      val snap = alwaysBringCol(uid).get().await()
+      val matches = snap.documents.filter { doc ->
+        val src = doc.getString("source").orEmpty()
+        val cat = doc.getString("category").orEmpty().trim().ifBlank { "Essentials" }
+        src != SOURCE_ALWAYS_DO &&
+          !cat.equals(CATEGORY_ALWAYS_DO, ignoreCase = true) &&
+          cat.equals(oldClean, ignoreCase = true)
+      }
+      if (matches.isEmpty()) return Result.success(0)
+
+      val batch = db.batch()
+      matches.forEach { doc ->
+        path = doc.reference.path
+        batch.update(
+          doc.reference,
+          mapOf(
+            "category" to newClean,
+            "updatedAt" to FieldValue.serverTimestamp(),
+          )
+        )
+      }
+      batch.commit().await()
+      Result.success(matches.size)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.WRITE, path, auth)
       Result.failure(e)
     }
   }
@@ -651,6 +776,64 @@ class PackingRepository(
       tripRef.update(
         mapOf(
           "headerImageUrl" to headerImageUrl.trim().take(950),
+          "updatedAt" to FieldValue.serverTimestamp(),
+        )
+      ).await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, path, auth)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun updateTripDestination(
+    tripId: String,
+    destination: String,
+    country: String,
+  ): Result<Unit> {
+    val cleanDest = destination.trim().take(120)
+    if (cleanDest.isBlank()) return Result.success(Unit)
+    var path = "users/${auth.currentUser?.uid ?: "unauthenticated"}/trips/$tripId"
+    return try {
+      val uid = requireUserId()
+      val tripRef = tripsCol(uid).document(tripId)
+      path = tripRef.path
+      tripRef.update(
+        mapOf(
+          "destination" to cleanDest,
+          "country" to country.trim().take(80),
+          "updatedAt" to FieldValue.serverTimestamp(),
+        )
+      ).await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, path, auth)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun updateTripActivities(
+    tripId: String,
+    activities: List<String>,
+  ): Result<Unit> {
+    var path = "users/${auth.currentUser?.uid ?: "unauthenticated"}/trips/$tripId"
+    return try {
+      val uid = requireUserId()
+      require(tripId.isNotBlank()) { "Trip ID must not be blank" }
+      val tripRef = tripsCol(uid).document(tripId)
+      path = tripRef.path
+      val sanitized = activities
+        .map { it.trim().take(60) }
+        .filter { it.isNotBlank() }
+        .distinctBy { it.lowercase(Locale.ROOT) }
+        .take(15)
+      tripRef.update(
+        mapOf(
+          "activities" to sanitized,
           "updatedAt" to FieldValue.serverTimestamp(),
         )
       ).await()

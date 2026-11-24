@@ -100,6 +100,7 @@ class OnDeviceNanoChecklistClient {
     alwaysBringNames: List<String>,
     homeCountry: String = "",
     isInternationalOverride: Boolean? = null,
+    focusActivities: List<String> = emptyList(),
   ): Result<List<DraftPackingItem>> {
     if (checkStatus() != NanoAvailabilityStatus.AVAILABLE) {
       return Result.failure(IllegalStateException("On-device Gemini Nano is not ready."))
@@ -125,12 +126,17 @@ class OnDeviceNanoChecklistClient {
         "Include the local plug power adapter and eSIM/roaming gear only if traveling internationally."
     }
 
+    val focusLine = if (focusActivities.isNotEmpty()) {
+      "\n      Newly added activities (prioritize specific gear/attire for these): ${focusActivities.joinToString(", ")}"
+    } else {
+      ""
+    }
     val compactPrompt = """
       Return ONLY valid JSON with key "items" as an array of 10-16 trip packing objects for $destination ($durationDays days, $nights nights).
       Each object must have: "name", "category" (Clothing|Weather Gear|Footwear|Activity Gear|Tech|Toiletries|Documents|Health|Outerwear|Essentials), "quantity" (integer 1-15), "sourceType" (duration|weather|activity|calendar|ai), "contextReason".
       $intlGuidance
       Weather: $weatherLine
-      Activities: $activitiesLine
+      Activities: $activitiesLine$focusLine
       Events: $calendarLine
       Skip existing items/chores: $excludedLine
       JSON:
