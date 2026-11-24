@@ -1,6 +1,5 @@
 package com.example
 
-import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -9,23 +8,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Luggage
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Luggage
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.Star
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.rounded.FlightTakeoff
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
@@ -33,9 +27,9 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -45,24 +39,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
-import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.example.data.ai.AiChecklistGenerator
 import com.example.data.firebase.PackingRepository
-import com.example.data.firebase.authStateFlow
 import com.example.data.firebase.configureAppCheck
 import com.example.data.local.DeviceCalendarReader
+import com.example.data.local.HomeBasePreferences
+import com.example.data.model.TasksImportTarget
 import com.example.data.model.UiState
+import com.example.data.model.VaultItemType
+import com.example.data.remote.DestinationPhotoRepository
 import com.example.data.remote.GoogleWorkspaceRepository
 import com.example.data.remote.WeatherRepository
 import com.example.notifications.WeatherAlertWorker
@@ -75,142 +71,169 @@ import com.example.ui.screens.IntegrationsSettingsScreen
 import com.example.ui.screens.TripDetailScreen
 import com.example.ui.screens.TripPlannerScreen
 import com.example.ui.theme.PackWiseTheme
-import com.example.ui.viewmodel.GoogleWorkspacePendingAction
 import com.example.ui.viewmodel.PackWiseViewModel
 import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FirebaseFirestore
-
-const val ROUTE_HOME = "home"
-const val ROUTE_ALWAYS_BRING = "always_bring"
-const val ROUTE_INTEGRATIONS = "integrations"
-const val ROUTE_PLANNER = "planner"
-const val ROUTE_TRIP_DETAIL = "trip_detail/{tripId}"
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
 
-    // STEP 1: Mandatory App Check configuration before UI, ViewModels, or Firebase operations.
+  private val incomingSharedText = MutableStateFlow<String?>(null)
+  private val incomingTripId = MutableStateFlow<String?>(null)
+
+  override fun onCreate(savedInstanceState: Bundle?) {
     configureAppCheck(this, intent)
+    super.onCreate(savedInstanceState)
+    enableEdgeToEdge()
 
     WeatherNotificationHelper.ensureChannel(this)
     WeatherAlertWorker.schedulePeriodic(this)
+    handleIntentExtras(intent)
 
-    val launchTripId = intent?.getStringExtra(WeatherNotificationHelper.EXTRA_TRIP_ID)
-    val sharedTasksText = if (
-      intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("text/") == true
-    ) {
-      intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }
-    } else null
-
-    enableEdgeToEdge()
     setContent {
       PackWiseTheme {
-        Surface(
-          modifier = Modifier.fillMaxSize(),
-          color = MaterialTheme.colorScheme.background,
-        ) {
-          AppNavigation(
-            initialTripId = launchTripId,
-            initialSharedTasksText = sharedTasksText,
-          )
-        }
+        val sharedText by incomingSharedText.collectAsStateWithLifecycle()
+        val notificationTripId by incomingTripId.collectAsStateWithLifecycle()
+
+        PackWiseRoot(
+          sharedText = sharedText,
+          onConsumeSharedText = { incomingSharedText.value = null },
+          notificationTripId = notificationTripId,
+          onConsumeNotificationTripId = { incomingTripId.value = null },
+        )
       }
+    }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    handleIntentExtras(intent)
+  }
+
+  private fun handleIntentExtras(intent: Intent?) {
+    if (intent == null) return
+    if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+      val shared = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+      if (!shared.isNullOrBlank()) {
+        incomingSharedText.value = shared
+      }
+    }
+    val tripId = intent.getStringExtra(WeatherNotificationHelper.EXTRA_TRIP_ID)?.trim()
+    if (!tripId.isNullOrBlank()) {
+      incomingTripId.value = tripId
     }
   }
 }
 
 @Composable
-fun AppNavigation(
-  initialTripId: String? = null,
-  initialSharedTasksText: String? = null,
+private fun PackWiseRoot(
+  sharedText: String?,
+  onConsumeSharedText: () -> Unit,
+  notificationTripId: String?,
+  onConsumeNotificationTripId: () -> Unit,
 ) {
-  val auth = Firebase.auth
-  val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+  var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
+
+  DisposableEffect(Unit) {
+    val auth = Firebase.auth
+    val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+      currentUser = firebaseAuth.currentUser
+    }
+    auth.addAuthStateListener(listener)
+    onDispose { auth.removeAuthStateListener(listener) }
+  }
 
   val user = currentUser
   if (user == null) {
-    AuthScreen(onAuthSuccess = {})
+    AuthScreen(
+      onAuthSuccess = { currentUser = Firebase.auth.currentUser },
+    )
   } else {
     key(user.uid) {
       PackWiseAppShell(
-        currentUserId = user.uid,
-        initialTripId = initialTripId,
-        initialSharedTasksText = initialSharedTasksText,
+        userId = user.uid,
+        sharedText = sharedText,
+        onConsumeSharedText = onConsumeSharedText,
+        notificationTripId = notificationTripId,
+        onConsumeNotificationTripId = onConsumeNotificationTripId,
       )
     }
   }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PackWiseAppShell(
-  currentUserId: String,
-  initialTripId: String?,
-  initialSharedTasksText: String? = null,
+private fun PackWiseAppShell(
+  userId: String,
+  sharedText: String?,
+  onConsumeSharedText: () -> Unit,
+  notificationTripId: String?,
+  onConsumeNotificationTripId: () -> Unit,
 ) {
   val context = LocalContext.current
+  val appContext = context.applicationContext
   val viewModel: PackWiseViewModel = viewModel(
-    key = currentUserId,
-    factory = viewModelFactory {
-      initializer {
-        val app = checkNotNull(this[APPLICATION_KEY])
-        val databaseId = app.getString(R.string.firestore_database_id)
-        val db = FirebaseFirestore.getInstance(databaseId)
-        PackWiseViewModel(
-          repository = PackingRepository(db, Firebase.auth),
+    key = "packwise_vm_$userId",
+    factory = object : ViewModelProvider.Factory {
+      @Suppress("UNCHECKED_CAST")
+      override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        return PackWiseViewModel(
+          repository = PackingRepository(appContext),
           weatherRepository = WeatherRepository(),
+          destinationPhotoRepository = DestinationPhotoRepository(),
           aiChecklistGenerator = AiChecklistGenerator(),
           workspaceRepository = GoogleWorkspaceRepository(),
-          deviceCalendarReader = DeviceCalendarReader(app.applicationContext),
-          currentUserId = currentUserId,
-        )
+          deviceCalendarReader = DeviceCalendarReader(appContext),
+          homeBasePreferences = HomeBasePreferences(appContext),
+          currentUserId = userId,
+        ) as T
       }
     },
   )
 
   val navController = rememberNavController()
   val navBackStackEntry by navController.currentBackStackEntryAsState()
-  val currentRoute = navBackStackEntry?.destination?.route
+  val currentRoute = navBackStackEntry?.destination?.route ?: "home"
+  val snackbarHostState = remember { SnackbarHostState() }
 
   val tripsState by viewModel.tripsState.collectAsStateWithLifecycle()
   val alwaysBringState by viewModel.alwaysBringState.collectAsStateWithLifecycle()
   val selectedTripItemsState by viewModel.selectedTripItemsState.collectAsStateWithLifecycle()
-  val selectedTripId by viewModel.selectedTripId.collectAsStateWithLifecycle()
+  val tripAiEnrichmentMap by viewModel.tripAiEnrichmentState.collectAsStateWithLifecycle()
+  val tripAiRecommendationsMap by viewModel.tripAiRecommendationsState.collectAsStateWithLifecycle()
+  val tripGuideLoadingMap by viewModel.tripGuideLoadingState.collectAsStateWithLifecycle()
+  val homeCountry by viewModel.homeCountry.collectAsStateWithLifecycle()
   val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
   val pendingConsent by viewModel.pendingConsentIntent.collectAsStateWithLifecycle()
+  val nanoStatus by viewModel.nanoStatus.collectAsStateWithLifecycle()
+  val nanoDownloadedMb by viewModel.nanoDownloadedMb.collectAsStateWithLifecycle()
 
   var showGoogleTasksSheet by remember { mutableStateOf(false) }
-  var tasksSheetDefaultAlwaysBring by remember { mutableStateOf(false) }
-  var pendingSharedTasksText by remember(initialSharedTasksText) { mutableStateOf(initialSharedTasksText) }
-  val snackbarHostState = remember { SnackbarHostState() }
+  var sheetTripId by remember { mutableStateOf<String?>(null) }
+  var sheetTripName by remember { mutableStateOf<String?>(null) }
+  var sheetDefaultTarget by remember { mutableStateOf(TasksImportTarget.ALWAYS_BRING) }
+  var sheetSharedText by remember { mutableStateOf<String?>(null) }
 
-  LaunchedEffect(initialSharedTasksText) {
-    if (!initialSharedTasksText.isNullOrBlank()) {
-      pendingSharedTasksText = initialSharedTasksText
-      tasksSheetDefaultAlwaysBring = false
-      showGoogleTasksSheet = true
-    }
-  }
-
-  // Handle Google OAuth consent resolution for Google Tasks / Google Calendar
-  var activePendingAction by remember { mutableStateOf<GoogleWorkspacePendingAction?>(null) }
   val consentLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.StartIntentSenderForResult(),
-  ) { result ->
-    val act = context as? Activity
-    val action = activePendingAction
-    if (act != null && action != null) {
-      viewModel.handleWorkspaceConsentResult(act, action, result.resultCode, result.data)
-    }
-    activePendingAction = null
-  }
+    onResult = { result ->
+      val activity = context as? ComponentActivity
+      val action = pendingConsent?.first
+      if (activity != null && action != null) {
+        viewModel.handleWorkspaceConsentResult(
+          activity = activity,
+          action = action,
+          resultCode = result.resultCode,
+          data = result.data,
+        )
+      }
+    },
+  )
 
   LaunchedEffect(pendingConsent) {
     val pair = pendingConsent ?: return@LaunchedEffect
-    activePendingAction = pair.first
-    consentLauncher.launch(IntentSenderRequest.Builder(pair.second.intentSender).build())
+    consentLauncher.launch(IntentSenderRequest.Builder(pair.second).build())
   }
 
   LaunchedEffect(toastMessage) {
@@ -219,247 +242,333 @@ fun PackWiseAppShell(
     viewModel.clearToast()
   }
 
-  LaunchedEffect(initialTripId) {
-    if (!initialTripId.isNullOrBlank()) {
-      viewModel.selectTrip(initialTripId)
-      navController.navigate("trip_detail/$initialTripId")
+  LaunchedEffect(sharedText) {
+    if (!sharedText.isNullOrBlank()) {
+      sheetTripId = null
+      sheetTripName = null
+      sheetDefaultTarget = TasksImportTarget.ALWAYS_BRING
+      sheetSharedText = sharedText
+      showGoogleTasksSheet = true
+      onConsumeSharedText()
     }
   }
 
-  val trips = (tripsState as? UiState.Success)?.data.orEmpty()
-  val alwaysBringCount = (alwaysBringState as? UiState.Success)?.data?.size ?: 0
-  val activeTripForSheet = trips.firstOrNull { it.id == selectedTripId }
-    ?: trips.firstOrNull { it.status == "active" }
+  LaunchedEffect(notificationTripId) {
+    if (!notificationTripId.isNullOrBlank()) {
+      viewModel.selectTrip(notificationTripId)
+      navController.navigate("trip_detail/$notificationTripId") {
+        launchSingleTop = true
+      }
+      onConsumeNotificationTripId()
+    }
+  }
 
-  val isTopLevelRoute = currentRoute in setOf(ROUTE_HOME, ROUTE_ALWAYS_BRING, ROUTE_INTEGRATIONS)
+  val showTopLevelNav = currentRoute in setOf("home", "always_bring", "integrations")
+  val vaultItems = (alwaysBringState as? UiState.Success)?.data.orEmpty()
+  val alwaysBringCount = vaultItems.count { !it.isAlwaysDo }
+  val alwaysDoCount = vaultItems.count { it.isAlwaysDo }
+  val trips = (tripsState as? UiState.Success)?.data.orEmpty()
+
+  LaunchedEffect(trips) {
+    if (trips.isNotEmpty()) {
+      viewModel.ensureTripHeaderPhotos(trips)
+    }
+  }
+
+  val openTasksSheetFor: (String?, String?, TasksImportTarget) -> Unit = { tripId, tripName, defaultTarget ->
+    sheetTripId = tripId
+    sheetTripName = tripName
+    sheetDefaultTarget = defaultTarget
+    sheetSharedText = null
+    showGoogleTasksSheet = true
+  }
 
   BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-    val useNavRail = maxWidth >= 600.dp
+    val useRail = maxWidth >= 700.dp
 
-    Row(modifier = Modifier.fillMaxSize()) {
-      if (useNavRail && isTopLevelRoute) {
-        NavigationRail {
-          NavigationRailItem(
-            selected = currentRoute == ROUTE_HOME,
-            onClick = {
-              navController.navigate(ROUTE_HOME) {
-                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                launchSingleTop = true
-                restoreState = true
-              }
-            },
-            icon = {
-              Icon(
-                if (currentRoute == ROUTE_HOME) Icons.Rounded.Luggage else Icons.Outlined.Luggage,
-                contentDescription = "Trips",
-              )
-            },
-            label = { Text("Trips") },
-          )
-          NavigationRailItem(
-            selected = currentRoute == ROUTE_ALWAYS_BRING,
-            onClick = {
-              navController.navigate(ROUTE_ALWAYS_BRING) {
-                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                launchSingleTop = true
-                restoreState = true
-              }
-            },
-            icon = {
-              Icon(
-                if (currentRoute == ROUTE_ALWAYS_BRING) Icons.Rounded.Star else Icons.Outlined.StarOutline,
-                contentDescription = "Always Bring",
-              )
-            },
-            label = { Text("Always Bring") },
-          )
-          NavigationRailItem(
-            selected = currentRoute == ROUTE_INTEGRATIONS,
-            onClick = {
-              navController.navigate(ROUTE_INTEGRATIONS) {
-                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                launchSingleTop = true
-                restoreState = true
-              }
-            },
-            icon = {
-              Icon(
-                if (currentRoute == ROUTE_INTEGRATIONS) Icons.Rounded.Settings else Icons.Outlined.Settings,
-                contentDescription = "Integrations",
-              )
-            },
-            label = { Text("Sync") },
-          )
-        }
-      }
-
-      Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-          if (isTopLevelRoute) {
-            CenterAlignedTopAppBar(
-              title = {
-                Text(
-                  text = when (currentRoute) {
-                    ROUTE_ALWAYS_BRING -> "Always Bring"
-                    ROUTE_INTEGRATIONS -> "Sync & Alerts"
-                    else -> "PackWise"
-                  },
-                  style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                )
-              },
-            )
-          }
-        },
-        floatingActionButton = {
-          if (currentRoute == ROUTE_HOME) {
-            FloatingActionButton(
-              onClick = { navController.navigate(ROUTE_PLANNER) },
-              containerColor = MaterialTheme.colorScheme.secondary,
-              contentColor = MaterialTheme.colorScheme.onSecondary,
-              modifier = Modifier.testTag("home_plan_trip_fab"),
-            ) {
-              Icon(Icons.Rounded.Add, contentDescription = "Plan New Trip")
-            }
-          }
-        },
-        bottomBar = {
-          if (!useNavRail && isTopLevelRoute) {
-            NavigationBar {
-              NavigationBarItem(
-                selected = currentRoute == ROUTE_HOME,
-                onClick = {
-                  navController.navigate(ROUTE_HOME) {
-                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                    launchSingleTop = true
-                    restoreState = true
-                  }
-                },
-                icon = {
-                  Icon(
-                    if (currentRoute == ROUTE_HOME) Icons.Rounded.Luggage else Icons.Outlined.Luggage,
-                    contentDescription = "Trips",
-                  )
-                },
-                label = { Text("Trips") },
-                modifier = Modifier.testTag("nav_trips"),
-              )
-              NavigationBarItem(
-                selected = currentRoute == ROUTE_ALWAYS_BRING,
-                onClick = {
-                  navController.navigate(ROUTE_ALWAYS_BRING) {
-                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                    launchSingleTop = true
-                    restoreState = true
-                  }
-                },
-                icon = {
-                  Icon(
-                    if (currentRoute == ROUTE_ALWAYS_BRING) Icons.Rounded.Star else Icons.Outlined.StarOutline,
-                    contentDescription = "Always Bring",
-                  )
-                },
-                label = { Text("Always Bring") },
-                modifier = Modifier.testTag("nav_always_bring"),
-              )
-              NavigationBarItem(
-                selected = currentRoute == ROUTE_INTEGRATIONS,
-                onClick = {
-                  navController.navigate(ROUTE_INTEGRATIONS) {
-                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                    launchSingleTop = true
-                    restoreState = true
-                  }
-                },
-                icon = {
-                  Icon(
-                    if (currentRoute == ROUTE_INTEGRATIONS) Icons.Rounded.Settings else Icons.Outlined.Settings,
-                    contentDescription = "Sync & Alerts",
-                  )
-                },
-                label = { Text("Sync") },
-                modifier = Modifier.testTag("nav_integrations"),
-              )
-            }
-          }
-        },
-      ) { innerPadding ->
-        NavHost(
-          navController = navController,
-          startDestination = ROUTE_HOME,
-          modifier = Modifier
-            .fillMaxSize()
-            .padding(innerPadding),
-        ) {
-          composable(ROUTE_HOME) {
-            HomeTripsScreen(
-              tripsState = tripsState,
-              alwaysBringCount = alwaysBringCount,
-              onPlanNewTrip = { navController.navigate(ROUTE_PLANNER) },
-              onOpenTrip = { tripId ->
-                viewModel.selectTrip(tripId)
-                navController.navigate("trip_detail/$tripId")
-              },
-              onOpenAlwaysBring = {
-                navController.navigate(ROUTE_ALWAYS_BRING)
-              },
-              onOpenGoogleTasksImport = {
-                tasksSheetDefaultAlwaysBring = activeTripForSheet == null
-                showGoogleTasksSheet = true
-              },
-            )
-          }
-
-          composable(ROUTE_ALWAYS_BRING) {
-            AlwaysBringScreen(
-              alwaysBringState = alwaysBringState,
-              viewModel = viewModel,
-              onOpenGoogleTasksImport = {
-                tasksSheetDefaultAlwaysBring = true
-                showGoogleTasksSheet = true
-              },
-            )
-          }
-
-          composable(ROUTE_INTEGRATIONS) {
-            IntegrationsSettingsScreen(
-              onOpenGoogleTasksImport = {
-                tasksSheetDefaultAlwaysBring = activeTripForSheet == null
-                showGoogleTasksSheet = true
-              },
-              onShowFeedback = { viewModel.showToast(it) },
-            )
-          }
-
-          composable(ROUTE_PLANNER) {
-            TripPlannerScreen(
-              viewModel = viewModel,
-              onNavigateBack = { navController.popBackStack() },
-              onTripCreated = { newTripId ->
-                navController.navigate("trip_detail/$newTripId") {
-                  popUpTo(ROUTE_PLANNER) { inclusive = true }
+    Scaffold(
+      snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+      bottomBar = {
+        if (showTopLevelNav && !useRail) {
+          NavigationBar {
+            NavigationBarItem(
+              selected = currentRoute == "home",
+              onClick = {
+                navController.navigate("home") {
+                  popUpTo("home") { inclusive = false }
+                  launchSingleTop = true
                 }
               },
+              icon = { Icon(Icons.Rounded.FlightTakeoff, contentDescription = null) },
+              label = { Text("Trips") },
+              modifier = Modifier.testTag("nav_trips"),
+            )
+            NavigationBarItem(
+              selected = currentRoute == "always_bring",
+              onClick = {
+                navController.navigate("always_bring") {
+                  popUpTo("home") { inclusive = false }
+                  launchSingleTop = true
+                }
+              },
+              icon = { Icon(Icons.Rounded.Shield, contentDescription = null) },
+              label = { Text("Always") },
+              modifier = Modifier.testTag("nav_always_bring"),
+            )
+            NavigationBarItem(
+              selected = currentRoute == "integrations",
+              onClick = {
+                navController.navigate("integrations") {
+                  popUpTo("home") { inclusive = false }
+                  launchSingleTop = true
+                }
+              },
+              icon = { Icon(Icons.Rounded.Tune, contentDescription = null) },
+              label = { Text("Integrations") },
+              modifier = Modifier.testTag("nav_integrations"),
             )
           }
+        }
+      },
+      floatingActionButton = {
+        if (currentRoute == "home") {
+          FloatingActionButton(
+            onClick = {
+              viewModel.resetPlannerDrafts()
+              navController.navigate("planner")
+            },
+            modifier = Modifier.testTag("home_plan_trip_fab"),
+          ) {
+            Icon(Icons.Rounded.Add, contentDescription = "Plan New Trip")
+          }
+        }
+      },
+    ) { innerPadding ->
+      Row(
+        modifier = Modifier
+          .fillMaxSize()
+          .padding(innerPadding),
+      ) {
+        if (showTopLevelNav && useRail) {
+          NavigationRail {
+            NavigationRailItem(
+              selected = currentRoute == "home",
+              onClick = {
+                navController.navigate("home") {
+                  popUpTo("home") { inclusive = false }
+                  launchSingleTop = true
+                }
+              },
+              icon = { Icon(Icons.Rounded.FlightTakeoff, contentDescription = null) },
+              label = { Text("Trips") },
+              modifier = Modifier.testTag("nav_trips"),
+            )
+            NavigationRailItem(
+              selected = currentRoute == "always_bring",
+              onClick = {
+                navController.navigate("always_bring") {
+                  popUpTo("home") { inclusive = false }
+                  launchSingleTop = true
+                }
+              },
+              icon = { Icon(Icons.Rounded.Shield, contentDescription = null) },
+              label = { Text("Always") },
+              modifier = Modifier.testTag("nav_always_bring"),
+            )
+            NavigationRailItem(
+              selected = currentRoute == "integrations",
+              onClick = {
+                navController.navigate("integrations") {
+                  popUpTo("home") { inclusive = false }
+                  launchSingleTop = true
+                }
+              },
+              icon = { Icon(Icons.Rounded.Tune, contentDescription = null) },
+              label = { Text("Integrations") },
+              modifier = Modifier.testTag("nav_integrations"),
+            )
+          }
+        }
 
-          composable(ROUTE_TRIP_DETAIL) { backStackEntry ->
-            val tripId = backStackEntry.arguments?.getString("tripId").orEmpty()
-            LaunchedEffect(tripId) {
-              viewModel.selectTrip(tripId)
-            }
-            val trip = trips.firstOrNull { it.id == tripId }
-            if (trip != null) {
-              TripDetailScreen(
-                trip = trip,
-                itemsState = selectedTripItemsState,
-                viewModel = viewModel,
-                onNavigateBack = { navController.popBackStack() },
+        Box(modifier = Modifier.weight(1f)) {
+          NavHost(
+            navController = navController,
+            startDestination = "home",
+          ) {
+            composable("home") {
+              HomeTripsScreen(
+                tripsState = tripsState,
+                alwaysBringCount = alwaysBringCount,
+                alwaysDoCount = alwaysDoCount,
+                onPlanNewTrip = {
+                  viewModel.resetPlannerDrafts()
+                  navController.navigate("planner")
+                },
+                onOpenTrip = { tripId ->
+                  viewModel.selectTrip(tripId)
+                  navController.navigate("trip_detail/$tripId")
+                },
+                onOpenAlwaysBring = {
+                  navController.navigate("always_bring") {
+                    popUpTo("home") { inclusive = false }
+                    launchSingleTop = true
+                  }
+                },
                 onOpenGoogleTasksImport = {
-                  tasksSheetDefaultAlwaysBring = false
-                  showGoogleTasksSheet = true
+                  val active = trips.firstOrNull()
+                  openTasksSheetFor(
+                    active?.id,
+                    active?.destination,
+                    if (active != null) TasksImportTarget.SELECTED_TRIP else TasksImportTarget.ALWAYS_BRING,
+                  )
                 },
               )
+            }
+
+            composable("always_bring") {
+              AlwaysBringScreen(
+                alwaysBringState = alwaysBringState,
+                onAddAlwaysBring = viewModel::addAlwaysBringItem,
+                onAddAlwaysDoTask = viewModel::addAlwaysDoTask,
+                onRecategorizeVaultItem = viewModel::recategorizeVaultItem,
+                onDeleteAlwaysBring = viewModel::deleteAlwaysBringItem,
+                onImportGoogleTasks = { activeTab ->
+                  val target = if (activeTab == VaultItemType.ALWAYS_DO) {
+                    TasksImportTarget.ALWAYS_DO
+                  } else {
+                    TasksImportTarget.ALWAYS_BRING
+                  }
+                  openTasksSheetFor(null, null, target)
+                },
+              )
+            }
+
+            composable("integrations") {
+              IntegrationsSettingsScreen(
+                nanoStatus = nanoStatus,
+                nanoDownloadedMb = nanoDownloadedMb,
+                homeCountry = homeCountry,
+                onSetManualHomeCountry = viewModel::setManualHomeCountry,
+                onResetHomeCountryToDeviceRegion = viewModel::resetHomeCountryToDeviceRegion,
+                onDetectHomeCountryFromLocation = viewModel::detectHomeCountryFromLocation,
+                onPrepareGeminiNano = { viewModel.prepareGeminiNano(userInitiated = true) },
+                onRefreshNanoStatus = viewModel::refreshNanoStatus,
+                onOpenGoogleTasksImport = {
+                  val active = trips.firstOrNull()
+                  openTasksSheetFor(
+                    active?.id,
+                    active?.destination,
+                    if (active != null) TasksImportTarget.SELECTED_TRIP else TasksImportTarget.ALWAYS_BRING,
+                  )
+                },
+                onShowFeedback = viewModel::showToast,
+              )
+            }
+
+            composable("planner") {
+              TripPlannerScreen(
+                viewModel = viewModel,
+                onNavigateBack = { navController.popBackStack() },
+                onTripCreated = { newTripId ->
+                  navController.navigate("trip_detail/$newTripId") {
+                    popUpTo("home") { inclusive = false }
+                  }
+                },
+              )
+            }
+
+            composable(
+              route = "trip_detail/{tripId}",
+              arguments = listOf(navArgument("tripId") { type = NavType.StringType }),
+            ) { backStackEntry ->
+              val tripId = backStackEntry.arguments?.getString("tripId").orEmpty()
+              LaunchedEffect(tripId) {
+                if (tripId.isNotBlank()) viewModel.selectTrip(tripId)
+              }
+              val trip = trips.firstOrNull { it.id == tripId }
+              if (trip != null) {
+                TripDetailScreen(
+                  trip = trip,
+                  itemsState = selectedTripItemsState,
+                  aiEnrichmentState = tripAiEnrichmentMap[trip.id] ?: UiState.Idle,
+                  aiRecommendationsState = tripAiRecommendationsMap[trip.id] ?: UiState.Idle,
+                  guideLoadingState = tripGuideLoadingMap[trip.id] ?: UiState.Idle,
+                  homeCountry = homeCountry,
+                  onNavigateBack = { navController.popBackStack() },
+                  onTogglePacked = { item -> viewModel.toggleItemPacked(trip.id, item) },
+                  onAddManualItem = { name, category, reason, qty, scope ->
+                    viewModel.addManualItemToTrip(trip.id, name, category, reason, qty, scope)
+                  },
+                  onDeleteItem = { itemId -> viewModel.deleteTripItem(trip.id, itemId) },
+                  onRecategorizeItem = { item, newScope, newCategory, saveToVault ->
+                    viewModel.recategorizeTripItem(trip.id, item, newScope, newCategory, saveToVault)
+                  },
+                  onRefreshWeather = {
+                    viewModel.refreshLiveWeatherForTrip(trip) { alertMessage, _ ->
+                      WeatherNotificationHelper.showWeatherPackingAlert(
+                        context = appContext,
+                        tripId = trip.id,
+                        destination = trip.destination,
+                        message = alertMessage,
+                      )
+                    }
+                  },
+                  onToggleNotifications = { enabled ->
+                    viewModel.toggleTripWeatherNotifications(trip, enabled)
+                  },
+                  onOpenGoogleTasksImport = {
+                    openTasksSheetFor(trip.id, trip.destination, TasksImportTarget.SELECTED_TRIP)
+                  },
+                  onOpenAiRecommendations = { forceRefresh ->
+                    viewModel.suggestAiItemsForTrip(trip, forceRefresh = forceRefresh)
+                  },
+                  onAddRecommendedItems = { selected ->
+                    viewModel.acceptRecommendedItems(trip.id, selected)
+                  },
+                  onDismissRecommendedItem = { itemName ->
+                    viewModel.dismissRecommendedItem(trip.id, itemName)
+                  },
+                  onClearAiRecommendationsError = {
+                    viewModel.clearAiRecommendationsError(trip.id)
+                  },
+                  onRetryAiEnrichment = { viewModel.enrichTripWithAi(trip) },
+                  onDismissAiEnrichmentError = { viewModel.clearTripAiEnrichmentError(trip.id) },
+                  onGenerateTravelGuide = { viewModel.generateTravelGuideForTrip(trip) },
+                  onDismissGuideError = { viewModel.clearTripGuideError(trip.id) },
+                  onAddSuggestedGuideItem = { name, category, reason ->
+                    viewModel.addSuggestedGuideItem(trip.id, name, category, reason)
+                  },
+                  onDismissAttraction = { attraction ->
+                    viewModel.dismissGuideAttraction(trip, attraction)
+                  },
+                  onCompleteAndResetTrip = { items, markCompleted ->
+                    viewModel.completeAndResetTrip(trip, items, markCompleted)
+                  },
+                  onDeleteTrip = {
+                    viewModel.deleteTrip(trip.id) {
+                      navController.popBackStack()
+                    }
+                  },
+                )
+              } else {
+                HomeTripsScreen(
+                  tripsState = tripsState,
+                  alwaysBringCount = alwaysBringCount,
+                  alwaysDoCount = alwaysDoCount,
+                  onPlanNewTrip = {
+                    viewModel.resetPlannerDrafts()
+                    navController.navigate("planner")
+                  },
+                  onOpenTrip = { id ->
+                    viewModel.selectTrip(id)
+                    navController.navigate("trip_detail/$id")
+                  },
+                  onOpenAlwaysBring = { navController.navigate("always_bring") },
+                  onOpenGoogleTasksImport = {
+                    openTasksSheetFor(null, null, TasksImportTarget.ALWAYS_BRING)
+                  },
+                )
+              }
             }
           }
         }
@@ -470,14 +579,11 @@ fun PackWiseAppShell(
   if (showGoogleTasksSheet) {
     GoogleTasksImportSheet(
       viewModel = viewModel,
-      activeTripId = activeTripForSheet?.id,
-      activeTripName = activeTripForSheet?.destination,
-      defaultToAlwaysBring = tasksSheetDefaultAlwaysBring,
-      initialSharedText = pendingSharedTasksText,
-      onDismiss = {
-        showGoogleTasksSheet = false
-        pendingSharedTasksText = null
-      },
+      activeTripId = sheetTripId,
+      activeTripName = sheetTripName,
+      defaultTarget = sheetDefaultTarget,
+      initialSharedText = sheetSharedText,
+      onDismiss = { showGoogleTasksSheet = false },
     )
   }
 }

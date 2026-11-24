@@ -1,6 +1,8 @@
 {
   "name": "PackWise",
-  "description": "Smart travel packing checklist app with custom trip lists, weather-aware alerts, calendar event suggestions, Google Tasks import, Always Bring essentials, and post-trip resets.",
+  "description": "Smart travel packing companion with live Open-Meteo weather forecasts, Gemini AI checklist generation, Google Tasks import, and Always Bring essentials vault.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

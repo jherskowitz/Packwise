@@ -1,93 +1,95 @@
 {
   "entities": {
-    "AlwaysBringItem": {
-      "title": "AlwaysBringItem",
-      "description": "A reusable essential packing item that is automatically included in every trip and reset after each journey.",
-      "type": "object",
-      "properties": {
-        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
-        "name": { "type": "string", "description": "Item display name" },
-        "category": { "type": "string", "description": "Packing category (Documents, Tech, Toiletries, Health, Clothing, Gear, General)" },
-        "quantity": { "type": "integer", "description": "Default quantity to pack" },
-        "notes": { "type": "string", "description": "Optional packing notes" },
-        "source": { "type": "string", "enum": ["default", "custom", "google_tasks"], "description": "Origin of the essential item" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())" },
-        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())" }
-      },
-      "required": ["userId", "name", "category", "quantity", "source", "createdAt", "updatedAt"]
-    },
     "Trip": {
       "title": "Trip",
-      "description": "A planned travel journey with destination coordinates, duration, weather forecast, activities, and calendar context.",
+      "description": "A planned journey with destination coordinates, date range, live weather forecast, activity context, and checklist lifecycle metadata.",
       "type": "object",
       "properties": {
-        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
-        "destination": { "type": "string", "description": "Trip destination name" },
-        "country": { "type": "string", "description": "Destination country or region" },
+        "userId": { "type": "string", "description": "Firebase Auth UID of the trip owner" },
+        "destination": { "type": "string", "description": "City or destination name" },
+        "country": { "type": "string", "description": "Country name" },
         "latitude": { "type": "number", "description": "Destination latitude" },
         "longitude": { "type": "number", "description": "Destination longitude" },
-        "startDateEpochDay": { "type": "integer", "description": "Start date as epoch day" },
-        "endDateEpochDay": { "type": "integer", "description": "End date as epoch day" },
-        "durationDays": { "type": "integer", "description": "Duration of the trip in days" },
-        "activities": { "type": "array", "description": "Selected destination activities (max 15)" },
-        "calendarEventsSummary": { "type": "array", "description": "Planned calendar events overlapping the trip (max 25)" },
-        "weatherSummary": { "type": "string", "description": "Human-readable weather forecast summary" },
-        "weatherTempMinC": { "type": "number", "description": "Forecast minimum temperature in Celsius" },
-        "weatherTempMaxC": { "type": "number", "description": "Forecast maximum temperature in Celsius" },
-        "weatherRainProbMax": { "type": "integer", "description": "Maximum precipitation probability percent" },
-        "weatherAlertActive": { "type": "boolean", "description": "Whether a weather packing alert is active" },
-        "weatherAlertMessage": { "type": "string", "description": "Weather packing alert guidance" },
-        "status": { "type": "string", "enum": ["active", "completed"], "description": "Current trip lifecycle status" },
-        "resetCount": { "type": "integer", "description": "Number of times this trip has been reset for a fresh journey" },
-        "weatherNotificationsEnabled": { "type": "boolean", "description": "Whether background weather push alerts are enabled for this trip" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())" },
-        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())" }
+        "startDateEpochDay": { "type": "integer", "description": "Start date as UTC epoch day" },
+        "endDateEpochDay": { "type": "integer", "description": "End date as UTC epoch day" },
+        "durationDays": { "type": "integer", "description": "Trip duration in days" },
+        "activities": { "type": "array", "items": { "type": "string" } },
+        "calendarEventsSummary": { "type": "array", "items": { "type": "string" } },
+        "weatherSummary": { "type": "string" },
+        "weatherTempMinC": { "type": "number" },
+        "weatherTempMaxC": { "type": "number" },
+        "weatherRainProbMax": { "type": "integer" },
+        "weatherAlertActive": { "type": "boolean" },
+        "weatherAlertMessage": { "type": "string" },
+        "weatherNotificationsEnabled": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "completed"] },
+        "resetCount": { "type": "integer" },
+        "travelGuideJson": { "type": "string", "description": "Optional serialized destination attractions, events, and international travel guide" },
+        "headerImageUrl": { "type": "string", "description": "Optional destination photo URL for trip card and detail headers" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "userId", "destination", "country", "latitude", "longitude",
         "startDateEpochDay", "endDateEpochDay", "durationDays",
         "activities", "calendarEventsSummary", "weatherSummary",
         "weatherTempMinC", "weatherTempMaxC", "weatherRainProbMax",
-        "weatherAlertActive", "weatherAlertMessage", "status",
-        "resetCount", "weatherNotificationsEnabled", "createdAt", "updatedAt"
+        "weatherAlertActive", "weatherAlertMessage", "weatherNotificationsEnabled",
+        "status", "resetCount", "createdAt", "updatedAt"
       ]
     },
     "PackingItem": {
       "title": "PackingItem",
-      "description": "An individual item in a trip's packing checklist, either an Always Bring essential or trip-contextual.",
+      "description": "An individual checklist item belonging to a user's trip.",
       "type": "object",
       "properties": {
-        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
-        "tripId": { "type": "string", "description": "Parent Trip document ID" },
-        "name": { "type": "string", "description": "Item name" },
-        "category": { "type": "string", "description": "Item category" },
-        "quantity": { "type": "integer", "description": "Recommended quantity" },
-        "isPacked": { "type": "boolean", "description": "Whether item is currently packed" },
-        "isAlwaysBring": { "type": "boolean", "description": "True if this item is an Always Bring essential" },
-        "contextReason": { "type": "string", "description": "Why this item was suggested (e.g., weather, duration, activity, calendar, always bring)" },
-        "sourceType": { "type": "string", "enum": ["always_bring", "weather", "duration", "activity", "calendar", "google_tasks", "custom"], "description": "Source category for the suggestion" },
-        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())" },
-        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())" }
+        "userId": { "type": "string" },
+        "tripId": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "isPacked": { "type": "boolean" },
+        "isAlwaysBring": { "type": "boolean" },
+        "sourceType": { "type": "string" },
+        "contextReason": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "userId", "tripId", "name", "category", "quantity",
-        "isPacked", "isAlwaysBring", "contextReason", "sourceType",
+        "isPacked", "isAlwaysBring", "sourceType", "contextReason",
         "createdAt", "updatedAt"
       ]
+    },
+    "AlwaysBringItem": {
+      "title": "AlwaysBringItem",
+      "description": "A reusable essential stored in the user's Always Bring vault and automatically added to new trips.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "notes": { "type": "string" },
+        "source": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "category", "quantity", "notes", "source", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
-    "/users/{userId}/alwaysBring/{itemId}": {
-      "schema": { "$ref": "#/entities/AlwaysBringItem" },
-      "description": "User's persistent Always Bring essential items"
-    },
-    "/users/{userId}/trips/{tripId}": {
+    "users/{userId}/trips/{tripId}": {
       "schema": { "$ref": "#/entities/Trip" },
-      "description": "User's travel trips with weather, activity, and calendar context"
+      "description": "Owner-scoped trips collection"
     },
-    "/users/{userId}/trips/{tripId}/items/{itemId}": {
+    "users/{userId}/trips/{tripId}/items/{itemId}": {
       "schema": { "$ref": "#/entities/PackingItem" },
-      "description": "Checklist items belonging to a specific trip"
+      "description": "Owner-scoped packing items subcollection per trip"
+    },
+    "users/{userId}/alwaysBring/{itemId}": {
+      "schema": { "$ref": "#/entities/AlwaysBringItem" },
+      "description": "Owner-scoped timeless Always Bring vault items"
     }
   }
 }

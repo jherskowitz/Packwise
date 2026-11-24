@@ -2,60 +2,71 @@ package com.example.data.firebase
 
 import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FirebaseFirestoreException
-import kotlinx.coroutines.CancellationException
-import org.json.JSONArray
 import org.json.JSONObject
 
-enum class OperationType(val value: String) {
-  CREATE("create"),
-  UPDATE("update"),
-  DELETE("delete"),
-  LIST("list"),
-  GET("get"),
-  WRITE("write"),
+enum class OperationType {
+  CREATE,
+  UPDATE,
+  DELETE,
+  LIST,
+  GET,
+  WRITE,
 }
 
+data class AuthUserInfo(
+  val uid: String? = null,
+  val email: String? = null,
+  val isEmailVerified: Boolean? = null,
+  val displayName: String? = null,
+  val photoUrl: String? = null,
+  val providerId: String? = null,
+)
+
+data class FirestoreErrorInfo(
+  val error: String,
+  val operationType: OperationType,
+  val path: String,
+  val authInfo: AuthUserInfo,
+)
+
 fun handleFirestoreError(
-  exception: Throwable,
+  exception: Exception,
   operationType: OperationType,
-  path: String?,
-  auth: FirebaseAuth = FirebaseAuth.getInstance(),
-): String {
-  val causes = generateSequence(exception) { it.cause }
-  val rootError = causes.firstOrNull { it is FirebaseFirestoreException }
-    ?: causes.firstOrNull { it !is CancellationException }
-    ?: exception
-
-  val currentUser = try {
-    auth.currentUser
-  } catch (e: Exception) {
-    null
-  }
-
-  val providerInfoList = currentUser?.providerData?.map { provider ->
+  path: String,
+  auth: FirebaseAuth,
+) {
+  val currentUser = auth.currentUser
+  val authInfo = AuthUserInfo(
+    uid = currentUser?.uid,
+    email = currentUser?.email,
+    isEmailVerified = currentUser?.isEmailVerified,
+    displayName = currentUser?.displayName,
+    photoUrl = currentUser?.photoUrl?.toString(),
+    providerId = currentUser?.providerData?.firstOrNull()?.providerId,
+  )
+  val errInfo = FirestoreErrorInfo(
+    error = exception.message ?: exception.toString(),
+    operationType = operationType,
+    path = path,
+    authInfo = authInfo,
+  )
+  val payload = runCatching {
     JSONObject().apply {
-      put("providerId", provider.providerId)
-      put("email", provider.email)
-    }
-  } ?: emptyList()
-
-  val authInfoJson = JSONObject().apply {
-    put("userId", currentUser?.uid)
-    put("email", currentUser?.email)
-    put("emailVerified", currentUser?.isEmailVerified)
-    put("tenantId", currentUser?.tenantId)
-    put("providerInfo", JSONArray(providerInfoList))
-  }
-
-  val errorInfoJson = JSONObject().apply {
-    put("error", rootError.message ?: rootError.toString())
-    put("operationType", operationType.value)
-    put("path", path)
-    put("authInfo", authInfoJson)
-  }
-
-  val jsonString = errorInfoJson.toString()
-  Log.e("FirestoreError", "Firestore Error: $jsonString")
-  return jsonString
+      put("error", errInfo.error)
+      put("operationType", errInfo.operationType.name)
+      put("path", errInfo.path)
+      put(
+        "authInfo",
+        JSONObject().apply {
+          put("uid", authInfo.uid)
+          put("email", authInfo.email)
+          put("isEmailVerified", authInfo.isEmailVerified)
+          put("displayName", authInfo.displayName)
+          put("photoUrl", authInfo.photoUrl)
+          put("providerId", authInfo.providerId)
+        }
+      )
+    }.toString()
+  }.getOrElse { errInfo.toString() }
+  Log.e("FirestoreError", "Firestore Error: $payload", exception)
 }

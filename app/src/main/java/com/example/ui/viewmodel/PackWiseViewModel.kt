@@ -7,52 +7,78 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.AiChecklistGenerator
+import com.example.data.ai.NanoAvailabilityStatus
 import com.example.data.firebase.PackingRepository
 import com.example.data.local.DeviceCalendarReader
+import com.example.data.local.HomeBasePreferences
+import com.example.data.local.HomeCountryPreference
+import com.example.data.local.HomeCountrySource
+import com.example.data.model.AiItemRecommendation
 import com.example.data.model.AlwaysBringItem
+import com.example.data.model.AttractionSuggestion
+import com.example.data.model.CATEGORY_ALWAYS_DO
 import com.example.data.model.CalendarEventInfo
 import com.example.data.model.DestinationPlace
 import com.example.data.model.DraftPackingItem
 import com.example.data.model.GoogleTaskItemInfo
 import com.example.data.model.GoogleTaskListInfo
 import com.example.data.model.PackingItem
+import com.example.data.model.SOURCE_ALWAYS_BRING
+import com.example.data.model.SOURCE_ALWAYS_DO
+import com.example.data.model.TasksImportTarget
 import com.example.data.model.Trip
+import com.example.data.model.TripItemScope
 import com.example.data.model.UiState
+import com.example.data.model.VaultItemType
 import com.example.data.model.WeatherForecastSummary
+import com.example.data.remote.DestinationPhotoRepository
 import com.example.data.remote.GoogleWorkspaceRepository
 import com.example.data.remote.WeatherRepository
 import com.example.data.remote.WorkspaceAuthState
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 enum class GoogleWorkspacePendingAction {
   TASKS,
   CALENDAR,
 }
 
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 class PackWiseViewModel(
   private val repository: PackingRepository,
   private val weatherRepository: WeatherRepository,
+  private val destinationPhotoRepository: DestinationPhotoRepository,
   private val aiChecklistGenerator: AiChecklistGenerator,
   private val workspaceRepository: GoogleWorkspaceRepository,
   private val deviceCalendarReader: DeviceCalendarReader,
+  private val homeBasePreferences: HomeBasePreferences,
   private val currentUserId: String,
 ) : ViewModel() {
 
-  // --- REAL-TIME FIRESTORE STREAMS ---
+  val homeCountry: StateFlow<HomeCountryPreference> = homeBasePreferences.homeCountryFlow
+    .stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.Eagerly,
+      initialValue = homeBasePreferences.detectDeviceHomeCountry(),
+    )
 
   val tripsState: StateFlow<UiState<List<Trip>>> = repository.observeTrips(currentUserId)
     .map<List<Trip>, UiState<List<Trip>>> { UiState.Success(it) }
@@ -63,7 +89,7 @@ class PackWiseViewModel(
       if (firestoreError == null && error is CancellationException) throw error
       val root = firestoreError ?: error
       Log.w(TAG, "Error observing trips", root)
-      emit(UiState.Error(root.message ?: "Failed to load trips."))
+      emit(UiState.Error(root.localizedMessage ?: "Failed to load trips."))
     }
     .stateIn(
       scope = viewModelScope,
@@ -71,23 +97,22 @@ class PackWiseViewModel(
       initialValue = UiState.Loading,
     )
 
-  val alwaysBringState: StateFlow<UiState<List<AlwaysBringItem>>> =
-    repository.observeAlwaysBringItems(currentUserId)
-      .map<List<AlwaysBringItem>, UiState<List<AlwaysBringItem>>> { UiState.Success(it) }
-      .catch { error ->
-        val firestoreError = generateSequence(error) { it.cause }
-          .filterIsInstance<FirebaseFirestoreException>()
-          .firstOrNull()
-        if (firestoreError == null && error is CancellationException) throw error
-        val root = firestoreError ?: error
-        Log.w(TAG, "Error observing always bring items", root)
-        emit(UiState.Error(root.message ?: "Failed to load Always Bring essentials."))
-      }
-      .stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000L),
-        initialValue = UiState.Loading,
-      )
+  val alwaysBringState: StateFlow<UiState<List<AlwaysBringItem>>> = repository.observeAlwaysBringItems(currentUserId)
+    .map<List<AlwaysBringItem>, UiState<List<AlwaysBringItem>>> { UiState.Success(it) }
+    .catch { error ->
+      val firestoreError = generateSequence(error) { it.cause }
+        .filterIsInstance<FirebaseFirestoreException>()
+        .firstOrNull()
+      if (firestoreError == null && error is CancellationException) throw error
+      val root = firestoreError ?: error
+      Log.w(TAG, "Error observing always bring items", root)
+      emit(UiState.Error(root.localizedMessage ?: "Failed to load Always Bring vault."))
+    }
+    .stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.WhileSubscribed(5000L),
+      initialValue = UiState.Loading,
+    )
 
   private val _selectedTripId = MutableStateFlow<String?>(null)
   val selectedTripId: StateFlow<String?> = _selectedTripId.asStateFlow()
@@ -95,7 +120,7 @@ class PackWiseViewModel(
   val selectedTripItemsState: StateFlow<UiState<List<PackingItem>>> = _selectedTripId
     .flatMapLatest { tripId ->
       if (tripId.isNullOrBlank()) {
-        flowOf(UiState.Idle)
+        flowOf<UiState<List<PackingItem>>>(UiState.Idle)
       } else {
         repository.observeTripItems(currentUserId, tripId)
           .map<List<PackingItem>, UiState<List<PackingItem>>> { UiState.Success(it) }
@@ -106,17 +131,15 @@ class PackWiseViewModel(
             if (firestoreError == null && error is CancellationException) throw error
             val root = firestoreError ?: error
             Log.w(TAG, "Error observing trip items", root)
-            emit(UiState.Error(root.message ?: "Failed to load packing checklist."))
+            emit(UiState.Error(root.localizedMessage ?: "Failed to load checklist."))
           }
       }
     }
     .stateIn(
       scope = viewModelScope,
       started = SharingStarted.WhileSubscribed(5000L),
-      initialValue = UiState.Idle,
+      initialValue = UiState.Loading,
     )
-
-  // --- TRIP PLANNER STATE ---
 
   private val _destinationQuery = MutableStateFlow("")
   val destinationQuery: StateFlow<String> = _destinationQuery.asStateFlow()
@@ -133,7 +156,7 @@ class PackWiseViewModel(
   private val _endEpochDay = MutableStateFlow(LocalDate.now().plusDays(5).toEpochDay())
   val endEpochDay: StateFlow<Long> = _endEpochDay.asStateFlow()
 
-  private val _selectedActivities = MutableStateFlow<Set<String>>(setOf("City Walking"))
+  private val _selectedActivities = MutableStateFlow(setOf("City Walking"))
   val selectedActivities: StateFlow<Set<String>> = _selectedActivities.asStateFlow()
 
   private val _weatherForecastState = MutableStateFlow<UiState<WeatherForecastSummary>>(UiState.Idle)
@@ -148,9 +171,16 @@ class PackWiseViewModel(
   private val _plannerGenerationState = MutableStateFlow<UiState<String>>(UiState.Idle)
   val plannerGenerationState: StateFlow<UiState<String>> = _plannerGenerationState.asStateFlow()
 
-  // --- GOOGLE TASKS / CALENDAR OAUTH IMPORT STATE ---
+  private val _tripAiEnrichmentState = MutableStateFlow<Map<String, UiState<String>>>(emptyMap())
+  val tripAiEnrichmentState: StateFlow<Map<String, UiState<String>>> = _tripAiEnrichmentState.asStateFlow()
 
-  private val _googleTasksAccessToken = MutableStateFlow<String?>(null)
+  private val _tripAiRecommendationsState = MutableStateFlow<Map<String, UiState<AiItemRecommendation>>>(emptyMap())
+  val tripAiRecommendationsState: StateFlow<Map<String, UiState<AiItemRecommendation>>> =
+    _tripAiRecommendationsState.asStateFlow()
+
+  private val _tripGuideLoadingState = MutableStateFlow<Map<String, UiState<Unit>>>(emptyMap())
+  val tripGuideLoadingState: StateFlow<Map<String, UiState<Unit>>> = _tripGuideLoadingState.asStateFlow()
+
   private val _googleTaskListsState = MutableStateFlow<UiState<List<GoogleTaskListInfo>>>(UiState.Idle)
   val googleTaskListsState: StateFlow<UiState<List<GoogleTaskListInfo>>> = _googleTaskListsState.asStateFlow()
 
@@ -160,6 +190,8 @@ class PackWiseViewModel(
   private val _googleTasksItemsState = MutableStateFlow<UiState<List<GoogleTaskItemInfo>>>(UiState.Idle)
   val googleTasksItemsState: StateFlow<UiState<List<GoogleTaskItemInfo>>> = _googleTasksItemsState.asStateFlow()
 
+  private val _googleTasksAccessToken = MutableStateFlow<String?>(null)
+
   private val _pendingConsentIntent = MutableStateFlow<Pair<GoogleWorkspacePendingAction, PendingIntent>?>(null)
   val pendingConsentIntent: StateFlow<Pair<GoogleWorkspacePendingAction, PendingIntent>?> =
     _pendingConsentIntent.asStateFlow()
@@ -167,263 +199,147 @@ class PackWiseViewModel(
   private val _toastMessage = MutableStateFlow<String?>(null)
   val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
 
+  private val _nanoStatus = MutableStateFlow(NanoAvailabilityStatus.UNAVAILABLE)
+  val nanoStatus: StateFlow<NanoAvailabilityStatus> = _nanoStatus.asStateFlow()
+
+  private val _nanoDownloadedMb = MutableStateFlow<Long?>(null)
+  val nanoDownloadedMb: StateFlow<Long?> = _nanoDownloadedMb.asStateFlow()
+
+  @Volatile
+  private var autoDownloadTriggered = false
+
+  private val photoLookupAttempted = mutableSetOf<String>()
+
   init {
     viewModelScope.launch {
       repository.seedDefaultAlwaysBringIfEmpty()
     }
+    viewModelScope.launch {
+      refreshNanoStatusInternal()
+    }
+    viewModelScope.launch {
+      _destinationQuery
+        .debounce(350L)
+        .distinctUntilChanged()
+        .collect { query ->
+          val trimmed = query.trim()
+          if (trimmed.length < 2 || _selectedPlace.value?.displayLabel() == query) {
+            _placeSuggestions.value = emptyList()
+          } else {
+            weatherRepository.searchDestinations(trimmed)
+              .onSuccess { _placeSuggestions.value = it }
+              .onFailure { _placeSuggestions.value = emptyList() }
+          }
+        }
+    }
+  }
+
+  fun selectTrip(tripId: String) {
+    _selectedTripId.value = tripId
   }
 
   fun clearToast() {
     _toastMessage.value = null
   }
 
-  fun showToast(msg: String) {
-    _toastMessage.value = msg
+  fun showToast(message: String) {
+    _toastMessage.value = message
   }
 
-  fun selectTrip(tripId: String?) {
-    _selectedTripId.value = tripId
-  }
-
-  // --- PLANNER INPUT HANDLERS ---
-
-  fun onDestinationQueryChange(query: String) {
-    _destinationQuery.value = query
-    if (_selectedPlace.value?.displayLabel != query) {
-      _selectedPlace.value = null
-    }
-    if (query.trim().length < 2) {
-      _placeSuggestions.value = emptyList()
-      return
-    }
+  fun setManualHomeCountry(countryCode: String, countryName: String) {
     viewModelScope.launch {
-      weatherRepository.searchDestinations(query)
-        .onSuccess { places -> _placeSuggestions.value = places }
-        .onFailure { _placeSuggestions.value = emptyList() }
+      homeBasePreferences.saveHomeCountry(countryCode, countryName, HomeCountrySource.MANUAL)
+      _toastMessage.value = "Home country set to $countryName."
     }
   }
 
-  fun selectDestinationPlace(place: DestinationPlace) {
-    _selectedPlace.value = place
-    _destinationQuery.value = place.displayLabel
-    _placeSuggestions.value = emptyList()
-    refreshPlannerForecast()
-  }
-
-  fun updateTripDates(startEpoch: Long, endEpoch: Long) {
-    val safeEnd = endEpoch.coerceAtLeast(startEpoch)
-    _startEpochDay.value = startEpoch
-    _endEpochDay.value = safeEnd
-    if (_selectedPlace.value != null) {
-      refreshPlannerForecast()
-    }
-  }
-
-  fun toggleActivity(activity: String) {
-    val current = _selectedActivities.value.toMutableSet()
-    if (!current.add(activity)) {
-      current.remove(activity)
-    }
-    _selectedActivities.value = current
-  }
-
-  fun addCustomActivity(activity: String) {
-    val clean = activity.trim()
-    if (clean.isNotBlank()) {
-      _selectedActivities.value = _selectedActivities.value + clean
-    }
-  }
-
-  fun refreshPlannerForecast() {
-    val place = _selectedPlace.value ?: return
+  fun resetHomeCountryToDeviceRegion() {
     viewModelScope.launch {
-      _weatherForecastState.value = UiState.Loading
-      weatherRepository.fetchForecastForTrip(
-        latitude = place.latitude,
-        longitude = place.longitude,
-        startEpochDay = _startEpochDay.value,
-        endEpochDay = _endEpochDay.value,
-      ).onSuccess { summary ->
-        _weatherForecastState.value = UiState.Success(summary)
-      }.onFailure { err ->
-        _weatherForecastState.value = UiState.Error(err.localizedMessage ?: "Failed to fetch live weather.")
-      }
+      val detected = homeBasePreferences.resetToDeviceRegion()
+      _toastMessage.value = "Home country set to ${detected.countryName} (from device region)."
     }
   }
 
-  fun loadDeviceCalendarEvents() {
-    if (!deviceCalendarReader.hasCalendarPermission()) {
-      _calendarStatusMessage.value = "Calendar permission is required to read synced calendar apps."
-      return
-    }
-    val events = deviceCalendarReader.readEventsForRange(_startEpochDay.value, _endEpochDay.value)
-    _calendarEvents.value = events
-    _calendarStatusMessage.value = if (events.isEmpty()) {
-      "No planned events found on device calendars for these dates."
-    } else {
-      "Loaded ${events.size} planned event(s) from your synced calendar apps."
-    }
-  }
-
-  fun fetchGoogleCalendarEvents(activity: Activity) {
+  fun detectHomeCountryFromLocation() {
     viewModelScope.launch {
-      _calendarStatusMessage.value = "Connecting to Google Calendar..."
-      workspaceRepository.authorizeScopes(
-        activity = activity,
-        scopes = listOf(GoogleWorkspaceRepository.SCOPE_CALENDAR_READONLY),
-      ).onSuccess { state ->
-        when (state) {
-          is WorkspaceAuthState.Authorized -> loadGoogleCalendarWithToken(state.accessToken)
-          is WorkspaceAuthState.NeedsConsent -> {
-            _pendingConsentIntent.value = GoogleWorkspacePendingAction.CALENDAR to state.pendingIntent
+      homeBasePreferences.detectCountryFromCoarseLocation()
+        .onSuccess { pref ->
+          _toastMessage.value = "Home country updated to ${pref.countryName} from approximate location."
+        }
+        .onFailure { err ->
+          _toastMessage.value = err.localizedMessage ?: "Could not detect country from location."
+        }
+    }
+  }
+
+  fun ensureTripHeaderPhotos(trips: List<Trip>) {
+    trips.forEach { trip ->
+      if (trip.headerImageUrl.isBlank() && photoLookupAttempted.add(trip.id)) {
+        viewModelScope.launch {
+          val photoUrl = destinationPhotoRepository.fetchDestinationPhotoUrl(
+            destination = trip.destination,
+            country = trip.country,
+          )
+          if (!photoUrl.isNullOrBlank()) {
+            repository.updateTripHeaderImage(trip.id, photoUrl)
           }
         }
-      }.onFailure { err ->
-        _calendarStatusMessage.value = "Google Calendar error: ${err.localizedMessage ?: "Authorization failed"}"
       }
     }
   }
 
-  private fun loadGoogleCalendarWithToken(token: String) {
+  fun refreshNanoStatus() {
     viewModelScope.launch {
-      workspaceRepository.fetchGoogleCalendarEvents(
-        accessToken = token,
-        startEpochDay = _startEpochDay.value,
-        endEpochDay = _endEpochDay.value,
-      ).onSuccess { googleEvents ->
-        val merged = (_calendarEvents.value + googleEvents)
-          .distinctBy { "${it.title}_${it.startEpochMillis}" }
-          .take(25)
-        _calendarEvents.value = merged
-        _calendarStatusMessage.value = if (merged.isEmpty()) {
-          "No Google Calendar events found for these dates."
-        } else {
-          "Synced ${merged.size} calendar event(s) for trip context."
-        }
-      }.onFailure { err ->
-        _calendarStatusMessage.value = "Could not load Google Calendar: ${err.localizedMessage}"
-      }
+      refreshNanoStatusInternal()
     }
   }
 
-  // --- GENERATE & SAVE TRIP CHECKLIST ---
+  private suspend fun refreshNanoStatusInternal() {
+    _nanoStatus.value = aiChecklistGenerator.checkNanoStatus()
+  }
 
-  fun generateAndCreateTrip(
-    weatherNotificationsEnabled: Boolean,
-    onCreated: (String) -> Unit,
-  ) {
-    val place = _selectedPlace.value
-    val destinationName = place?.name ?: _destinationQuery.value.trim()
-    if (destinationName.isBlank()) {
-      _plannerGenerationState.value = UiState.Error("Please enter or select a destination first.")
+  fun prepareGeminiNano(userInitiated: Boolean = true) {
+    if (_nanoStatus.value == NanoAvailabilityStatus.DOWNLOADING) {
+      if (userInitiated) _toastMessage.value = "Gemini Nano is already downloading in the background."
       return
     }
-    val startEpoch = _startEpochDay.value
-    val endEpoch = _endEpochDay.value.coerceAtLeast(startEpoch)
-    val durationDays = (endEpoch - startEpoch + 1L).coerceIn(1L, 365L)
-
     viewModelScope.launch {
-      _plannerGenerationState.value = UiState.Loading
-
-      // Resolve coordinates & live weather if user typed a city without tapping autocomplete
-      val resolvedPlace = place ?: weatherRepository.searchDestinations(destinationName)
-        .getOrNull()?.firstOrNull()
-
-      val lat = resolvedPlace?.latitude ?: 0.0
-      val lon = resolvedPlace?.longitude ?: 0.0
-      val country = resolvedPlace?.country.orEmpty()
-
-      val forecast = if (resolvedPlace != null) {
-        (weatherForecastState.value as? UiState.Success)?.data
-          ?: weatherRepository.fetchForecastForTrip(lat, lon, startEpoch, endEpoch).getOrNull()
-      } else null
-
-      val alwaysBring = (alwaysBringState.value as? UiState.Success)?.data.orEmpty()
-      val events = _calendarEvents.value
-      val activities = _selectedActivities.value.toList()
-
-      val aiResult = aiChecklistGenerator.generateChecklist(
-        destination = resolvedPlace?.name ?: destinationName,
-        country = country,
-        durationDays = durationDays,
-        activities = activities,
-        weather = forecast,
-        calendarEvents = events,
-        alwaysBringItems = alwaysBring,
-      )
-
-      val aiItems = aiResult.getOrElse { err ->
-        Log.e(TAG, "AI generation error", err)
-        _plannerGenerationState.value = UiState.Error(
-          err.localizedMessage ?: "Gemini AI failed to generate checklist."
-        )
-        return@launch
-      }
-
-      // Combine Always Bring essentials + AI-generated items + any direct calendar/weather items (deduped)
-      val drafts = mutableListOf<DraftPackingItem>()
-      val seenNames = mutableSetOf<String>()
-
-      alwaysBring.forEach { ab ->
-        if (seenNames.add(ab.name.lowercase())) {
-          drafts.add(
-            DraftPackingItem(
-              name = ab.name,
-              category = ab.category,
-              quantity = ab.quantity,
-              isAlwaysBring = true,
-              contextReason = "Always Bring essential",
-              sourceType = "always_bring",
-            )
-          )
+      val current = aiChecklistGenerator.checkNanoStatus()
+      _nanoStatus.value = current
+      when (current) {
+        NanoAvailabilityStatus.AVAILABLE -> {
+          if (userInitiated) _toastMessage.value = "Gemini Nano is ready on this device."
         }
-      }
-
-      events.flatMap { it.suggestedItems }.forEach { calItem ->
-        if (seenNames.add(calItem.name.lowercase())) {
-          drafts.add(calItem)
+        NanoAvailabilityStatus.DOWNLOADING -> {
+          if (userInitiated) _toastMessage.value = "Gemini Nano is currently downloading."
         }
-      }
-
-      forecast?.recommendedGear.orEmpty().forEach { wItem ->
-        if (seenNames.add(wItem.name.lowercase())) {
-          drafts.add(wItem)
+        NanoAvailabilityStatus.UNAVAILABLE -> {
+          if (userInitiated) {
+            _toastMessage.value = "Gemini Nano isn't supported on this device; Cloud Gemini is active."
+          }
         }
-      }
-
-      aiItems.forEach { item ->
-        if (seenNames.add(item.name.lowercase())) {
-          drafts.add(item)
+        NanoAvailabilityStatus.DOWNLOADABLE -> {
+          _nanoStatus.value = NanoAvailabilityStatus.DOWNLOADING
+          _nanoDownloadedMb.value = 0L
+          if (userInitiated) {
+            _toastMessage.value = "Downloading Gemini Nano for offline on-device packing lists..."
+          }
+          aiChecklistGenerator.downloadNanoModel { bytes ->
+            _nanoDownloadedMb.value = bytes / (1024L * 1024L)
+          }.onSuccess {
+            _nanoDownloadedMb.value = null
+            _nanoStatus.value = aiChecklistGenerator.checkNanoStatus()
+            if (userInitiated || _nanoStatus.value == NanoAvailabilityStatus.AVAILABLE) {
+              _toastMessage.value = "On-device Gemini Nano is ready!"
+            }
+          }.onFailure { err ->
+            _nanoDownloadedMb.value = null
+            _nanoStatus.value = aiChecklistGenerator.checkNanoStatus()
+            if (userInitiated) {
+              _toastMessage.value = err.localizedMessage ?: "Gemini Nano download failed; Cloud Gemini remains active."
+            }
+          }
         }
-      }
-
-      val eventSummaries = events.map { DeviceCalendarReader.formatEventSummary(it) }.take(25)
-
-      repository.createTripWithItems(
-        destination = resolvedPlace?.name ?: destinationName,
-        country = country,
-        latitude = lat,
-        longitude = lon,
-        startDateEpochDay = startEpoch,
-        endDateEpochDay = endEpoch,
-        durationDays = durationDays,
-        activities = activities,
-        calendarEventsSummary = eventSummaries,
-        weatherSummary = forecast?.summaryText ?: "Seasonal weather (coordinates pending)",
-        weatherTempMinC = forecast?.tempMinC ?: 15.0,
-        weatherTempMaxC = forecast?.tempMaxC ?: 22.0,
-        weatherRainProbMax = forecast?.rainProbMax ?: 0L,
-        weatherAlertActive = forecast?.alertActive ?: false,
-        weatherAlertMessage = forecast?.alertMessage ?: "",
-        weatherNotificationsEnabled = weatherNotificationsEnabled,
-        draftItems = drafts,
-      ).onSuccess { newTripId ->
-        _selectedTripId.value = newTripId
-        _plannerGenerationState.value = UiState.Success(newTripId)
-        resetPlannerDrafts()
-        onCreated(newTripId)
-      }.onFailure { err ->
-        _plannerGenerationState.value = UiState.Error(err.localizedMessage ?: "Failed to save trip.")
       }
     }
   }
@@ -434,16 +350,677 @@ class PackWiseViewModel(
     }
   }
 
-  private fun resetPlannerDrafts() {
+  fun clearTripAiEnrichmentError(tripId: String) {
+    val current = _tripAiEnrichmentState.value
+    if (current[tripId] is UiState.Error) {
+      _tripAiEnrichmentState.value = current - tripId
+    }
+  }
+
+  fun resetPlannerDrafts() {
     _destinationQuery.value = ""
-    _selectedPlace.value = null
     _placeSuggestions.value = emptyList()
+    _selectedPlace.value = null
+    _startEpochDay.value = LocalDate.now().plusDays(1).toEpochDay()
+    _endEpochDay.value = LocalDate.now().plusDays(5).toEpochDay()
+    _selectedActivities.value = setOf("City Walking")
     _weatherForecastState.value = UiState.Idle
     _calendarEvents.value = emptyList()
     _calendarStatusMessage.value = null
+    _plannerGenerationState.value = UiState.Idle
   }
 
-  // --- TRIP DETAIL ACTIONS ---
+  fun onDestinationQueryChange(query: String) {
+    _destinationQuery.value = query
+    if (_selectedPlace.value?.displayLabel() != query) {
+      _selectedPlace.value = null
+    }
+  }
+
+  fun selectDestinationPlace(place: DestinationPlace) {
+    _selectedPlace.value = place
+    _destinationQuery.value = place.displayLabel()
+    _placeSuggestions.value = emptyList()
+    refreshPlannerForecast()
+  }
+
+  fun updateTripDates(startEpochDay: Long, endEpochDay: Long) {
+    val safeEnd = maxOf(startEpochDay, endEpochDay)
+    _startEpochDay.value = startEpochDay
+    _endEpochDay.value = safeEnd
+    if (_selectedPlace.value != null) {
+      refreshPlannerForecast()
+    }
+  }
+
+  fun toggleActivity(activity: String) {
+    val current = _selectedActivities.value
+    _selectedActivities.value = if (activity in current) current - activity else current + activity
+  }
+
+  fun addCustomActivity(activity: String) {
+    val trimmed = activity.trim()
+    if (trimmed.isNotBlank()) {
+      _selectedActivities.value = _selectedActivities.value + trimmed
+    }
+  }
+
+  fun refreshPlannerForecast() {
+    val place = _selectedPlace.value
+    if (place == null) {
+      val q = _destinationQuery.value.trim()
+      if (q.length < 2) {
+        _weatherForecastState.value = UiState.Error("Please enter or select a destination first.")
+        return
+      }
+      viewModelScope.launch {
+        _weatherForecastState.value = UiState.Loading
+        val resolved = weatherRepository.searchDestinations(q).getOrNull()?.firstOrNull()
+        if (resolved == null) {
+          _weatherForecastState.value = UiState.Error("Could not find coordinates for $q.")
+          return@launch
+        }
+        _selectedPlace.value = resolved
+        fetchForecastInternal(resolved)
+      }
+    } else {
+      viewModelScope.launch {
+        _weatherForecastState.value = UiState.Loading
+        fetchForecastInternal(place)
+      }
+    }
+  }
+
+  private suspend fun fetchForecastInternal(place: DestinationPlace) {
+    weatherRepository.fetchForecastForTrip(
+      latitude = place.latitude,
+      longitude = place.longitude,
+      startEpochDay = _startEpochDay.value,
+      endEpochDay = _endEpochDay.value,
+    ).onSuccess {
+      _weatherForecastState.value = UiState.Success(it)
+    }.onFailure { err ->
+      _weatherForecastState.value = UiState.Error(err.localizedMessage ?: "Failed to fetch live weather.")
+    }
+  }
+
+  fun loadDeviceCalendarEvents() {
+    if (!deviceCalendarReader.hasCalendarPermission()) {
+      _calendarStatusMessage.value = "Calendar permission is required to read synced calendar apps."
+      return
+    }
+    val events = deviceCalendarReader.queryEventsForDateRange(_startEpochDay.value, _endEpochDay.value)
+    _calendarEvents.value = events
+    _calendarStatusMessage.value = if (events.isEmpty()) {
+      "No planned events found on device calendars for these dates."
+    } else {
+      "Loaded ${events.size} planned event(s) from your synced calendar apps."
+    }
+  }
+
+  fun generateAndCreateTrip(
+    weatherNotificationsEnabled: Boolean,
+    onCreated: (String) -> Unit,
+  ) {
+    val destText = _destinationQuery.value.trim()
+    if (destText.isBlank()) {
+      _toastMessage.value = "Please enter or select a destination first."
+      return
+    }
+    if (_plannerGenerationState.value is UiState.Loading) return
+
+    viewModelScope.launch {
+      _plannerGenerationState.value = UiState.Loading
+
+      var place = _selectedPlace.value
+      if (place == null) {
+        place = withTimeoutOrNull(6_000L) {
+          weatherRepository.searchDestinations(destText).getOrNull()?.firstOrNull()
+        }
+        if (place != null) _selectedPlace.value = place
+      }
+
+      var forecast = (_weatherForecastState.value as? UiState.Success)?.data
+      if (forecast == null && place != null) {
+        forecast = withTimeoutOrNull(6_000L) {
+          weatherRepository.fetchForecastForTrip(
+            latitude = place.latitude,
+            longitude = place.longitude,
+            startEpochDay = _startEpochDay.value,
+            endEpochDay = _endEpochDay.value,
+          ).getOrNull()
+        }
+        if (forecast != null) _weatherForecastState.value = UiState.Success(forecast)
+      }
+
+      val durationDays = ((_endEpochDay.value - _startEpochDay.value) + 1L).coerceAtLeast(1L)
+      val knownAlwaysBring = (alwaysBringState.value as? UiState.Success)?.data.orEmpty()
+      val events = _calendarEvents.value
+      val activities = _selectedActivities.value.toList()
+      val baseItems = mutableListOf<DraftPackingItem>()
+      val seenNames = mutableSetOf<String>()
+
+      forecast?.recommendedGear.orEmpty().forEach { gear ->
+        if (seenNames.add(gear.lowercase(Locale.ROOT))) {
+          baseItems.add(
+            DraftPackingItem(
+              name = gear,
+              category = "Weather Gear",
+              quantity = 1L,
+              isAlwaysBring = false,
+              contextReason = forecast?.alertMessage?.ifBlank { forecast.summaryText } ?: "Live weather forecast",
+              sourceType = "weather",
+            )
+          )
+        }
+      }
+
+      events.forEach { ev ->
+        ev.suggestedItems.forEach { gear ->
+          if (seenNames.add(gear.lowercase(Locale.ROOT))) {
+            baseItems.add(
+              DraftPackingItem(
+                name = gear,
+                category = "Activity Gear",
+                quantity = 1L,
+                isAlwaysBring = false,
+                contextReason = "Event: ${ev.title}",
+                sourceType = "calendar",
+              )
+            )
+          }
+        }
+      }
+
+      val calSummary = events.map { ev ->
+        if (ev.location.isNotBlank()) "${ev.title} (${ev.location})" else ev.title
+      }
+      val resolvedDest = place?.name ?: destText
+      val resolvedCountry = place?.country.orEmpty()
+      val weatherSummary = forecast?.summaryText ?: "Seasonal weather (coordinates pending)"
+      val headerPhotoUrl = withTimeoutOrNull(2_500L) {
+        destinationPhotoRepository.fetchDestinationPhotoUrl(resolvedDest, resolvedCountry)
+      }.orEmpty()
+
+      repository.createTripWithItems(
+        destination = resolvedDest,
+        country = resolvedCountry,
+        latitude = place?.latitude ?: 0.0,
+        longitude = place?.longitude ?: 0.0,
+        startDateEpochDay = _startEpochDay.value,
+        endDateEpochDay = _endEpochDay.value,
+        durationDays = durationDays,
+        activities = activities,
+        calendarEventsSummary = calSummary,
+        weatherSummary = weatherSummary,
+        weatherTempMinC = forecast?.tempMinC ?: 0.0,
+        weatherTempMaxC = forecast?.tempMaxC ?: 0.0,
+        weatherRainProbMax = forecast?.rainProbMax ?: 0L,
+        weatherAlertActive = forecast?.alertActive ?: false,
+        weatherAlertMessage = forecast?.alertMessage.orEmpty(),
+        weatherNotificationsEnabled = weatherNotificationsEnabled,
+        draftItems = baseItems,
+        knownAlwaysBring = knownAlwaysBring,
+        headerImageUrl = headerPhotoUrl,
+      ).onSuccess { newTripId ->
+        _plannerGenerationState.value = UiState.Success(newTripId)
+        _selectedTripId.value = newTripId
+        val createdTrip = Trip(
+          id = newTripId,
+          userId = currentUserId,
+          destination = resolvedDest,
+          country = resolvedCountry,
+          latitude = place?.latitude ?: 0.0,
+          longitude = place?.longitude ?: 0.0,
+          startDateEpochDay = _startEpochDay.value,
+          endDateEpochDay = _endEpochDay.value,
+          durationDays = durationDays,
+          activities = activities,
+          calendarEventsSummary = calSummary,
+          weatherSummary = weatherSummary,
+          weatherTempMinC = forecast?.tempMinC ?: 0.0,
+          weatherTempMaxC = forecast?.tempMaxC ?: 0.0,
+          weatherRainProbMax = forecast?.rainProbMax ?: 0L,
+          weatherAlertActive = forecast?.alertActive ?: false,
+          weatherAlertMessage = forecast?.alertMessage.orEmpty(),
+          weatherNotificationsEnabled = weatherNotificationsEnabled,
+          headerImageUrl = headerPhotoUrl,
+        )
+        if (headerPhotoUrl.isBlank()) {
+          ensureTripHeaderPhotos(listOf(createdTrip))
+        }
+        enrichTripWithAi(
+          trip = createdTrip,
+          forecastOverride = forecast,
+          calendarEventsOverride = events,
+        )
+        onCreated(newTripId)
+      }.onFailure { err ->
+        _plannerGenerationState.value = UiState.Error(err.localizedMessage ?: "Failed to save trip.")
+      }
+    }
+  }
+
+  fun enrichTripWithAi(
+    trip: Trip,
+    forecastOverride: WeatherForecastSummary? = null,
+    calendarEventsOverride: List<CalendarEventInfo> = emptyList(),
+  ) {
+    if (_tripAiEnrichmentState.value[trip.id] is UiState.Loading) return
+    viewModelScope.launch {
+      _tripAiEnrichmentState.value = _tripAiEnrichmentState.value + (trip.id to UiState.Loading)
+
+      val existingNames = repository.getTripItemsOnce(trip.id)
+        .map { it.name.trim().lowercase(Locale.ROOT) }
+        .toSet()
+      val alwaysBringNames = (alwaysBringState.value as? UiState.Success)?.data?.map { it.name }.orEmpty()
+      val excludedNames = (existingNames + alwaysBringNames.map { it.trim().lowercase(Locale.ROOT) }).toList()
+
+      val forecastSummary = forecastOverride ?: if (trip.weatherSummary.isNotBlank()) {
+        WeatherForecastSummary(
+          summaryText = trip.weatherSummary,
+          tempMinC = trip.weatherTempMinC,
+          tempMaxC = trip.weatherTempMaxC,
+          rainProbMax = trip.weatherRainProbMax,
+          maxWindKmh = 0.0,
+          alertActive = trip.weatherAlertActive,
+          alertMessage = trip.weatherAlertMessage,
+        )
+      } else {
+        null
+      }
+
+      val home = homeCountry.value
+      val isIntl = HomeBasePreferences.isTripInternational(home, trip.country)
+
+      val aiResult = aiChecklistGenerator.generateChecklist(
+        destination = trip.destination,
+        durationDays = trip.durationDays.coerceAtLeast(1L),
+        forecast = forecastSummary,
+        activities = trip.activities,
+        calendarEvents = calendarEventsOverride,
+        alwaysBringNames = excludedNames,
+        country = trip.country,
+        dateRangeLabel = formatTripDateRange(trip),
+        homeCountry = home.countryName,
+        isInternationalOverride = isIntl,
+        onNanoDownloadable = {
+          if (!autoDownloadTriggered) {
+            autoDownloadTriggered = true
+            prepareGeminiNano(userInitiated = false)
+          }
+        },
+      )
+
+      aiResult.onSuccess { generated ->
+        _nanoStatus.value = aiChecklistGenerator.checkNanoStatus()
+        if (trip.travelGuide == null && generated.travelGuide != null) {
+          repository.updateTripTravelGuide(trip.id, generated.travelGuide)
+        }
+        val freshItems = generated.items.filter { it.name.trim().lowercase(Locale.ROOT) !in existingNames }
+        if (freshItems.isEmpty()) {
+          _tripAiEnrichmentState.value = _tripAiEnrichmentState.value - trip.id
+          _toastMessage.value = "All AI-suggested items are already in your checklist (${generated.engineLabel})."
+        } else {
+          repository.addPackingItemsBatch(trip.id, freshItems)
+            .onSuccess { added ->
+              _tripAiEnrichmentState.value = _tripAiEnrichmentState.value - trip.id
+              _toastMessage.value = "Added $added item(s) via ${generated.engineLabel}!"
+            }
+            .onFailure { err ->
+              _tripAiEnrichmentState.value = _tripAiEnrichmentState.value + (
+                trip.id to UiState.Error(err.localizedMessage ?: "Failed to save AI items.")
+              )
+            }
+        }
+      }.onFailure { err ->
+        Log.e(TAG, "AI enrichment failed for trip ${trip.id}", err)
+        _tripAiEnrichmentState.value = _tripAiEnrichmentState.value + (
+          trip.id to UiState.Error(err.localizedMessage ?: "Gemini AI enrichment failed.")
+        )
+      }
+    }
+  }
+
+  fun suggestAiItemsForTrip(
+    trip: Trip,
+    forceRefresh: Boolean = false,
+  ) {
+    val currentState = _tripAiRecommendationsState.value[trip.id]
+    if (!forceRefresh) {
+      if (currentState is UiState.Loading) return
+      if (currentState is UiState.Success && currentState.data.items.isNotEmpty()) return
+    }
+    if (currentState is UiState.Loading) return
+
+    viewModelScope.launch {
+      _tripAiRecommendationsState.value = _tripAiRecommendationsState.value + (trip.id to UiState.Loading)
+
+      val existingNames = repository.getTripItemsOnce(trip.id)
+        .map { it.name.trim().lowercase(Locale.ROOT) }
+        .toSet()
+      val alwaysBringNames = (alwaysBringState.value as? UiState.Success)?.data?.map { it.name }.orEmpty()
+      val excludedNames = (existingNames + alwaysBringNames.map { it.trim().lowercase(Locale.ROOT) }).toList()
+
+      val forecastSummary = if (trip.weatherSummary.isNotBlank()) {
+        WeatherForecastSummary(
+          summaryText = trip.weatherSummary,
+          tempMinC = trip.weatherTempMinC,
+          tempMaxC = trip.weatherTempMaxC,
+          rainProbMax = trip.weatherRainProbMax,
+          maxWindKmh = 0.0,
+          alertActive = trip.weatherAlertActive,
+          alertMessage = trip.weatherAlertMessage,
+        )
+      } else {
+        null
+      }
+
+      val home = homeCountry.value
+      val isIntl = HomeBasePreferences.isTripInternational(home, trip.country)
+
+      val aiResult = aiChecklistGenerator.generateChecklist(
+        destination = trip.destination,
+        durationDays = trip.durationDays.coerceAtLeast(1L),
+        forecast = forecastSummary,
+        activities = trip.activities,
+        calendarEvents = emptyList(),
+        alwaysBringNames = excludedNames,
+        country = trip.country,
+        dateRangeLabel = formatTripDateRange(trip),
+        homeCountry = home.countryName,
+        isInternationalOverride = isIntl,
+        onNanoDownloadable = {
+          if (!autoDownloadTriggered) {
+            autoDownloadTriggered = true
+            prepareGeminiNano(userInitiated = false)
+          }
+        },
+      )
+
+      aiResult.onSuccess { generated ->
+        _nanoStatus.value = aiChecklistGenerator.checkNanoStatus()
+        if (trip.travelGuide == null && generated.travelGuide != null) {
+          repository.updateTripTravelGuide(trip.id, generated.travelGuide)
+        }
+        val freshItems = generated.items.filter { it.name.trim().lowercase(Locale.ROOT) !in existingNames }
+        _tripAiRecommendationsState.value = _tripAiRecommendationsState.value + (
+          trip.id to UiState.Success(
+            AiItemRecommendation(
+              engineLabel = generated.engineLabel,
+              items = freshItems,
+            )
+          )
+        )
+      }.onFailure { err ->
+        Log.e(TAG, "AI recommendation generation failed for trip ${trip.id}", err)
+        _tripAiRecommendationsState.value = _tripAiRecommendationsState.value + (
+          trip.id to UiState.Error(err.localizedMessage ?: "Could not load AI recommendations.")
+        )
+      }
+    }
+  }
+
+  fun acceptRecommendedItems(tripId: String, selectedItems: List<DraftPackingItem>) {
+    if (selectedItems.isEmpty()) return
+    viewModelScope.launch {
+      val existingNames = repository.getTripItemsOnce(tripId)
+        .map { it.name.trim().lowercase(Locale.ROOT) }
+        .toSet()
+      val freshToAdd = selectedItems.filter { it.name.trim().lowercase(Locale.ROOT) !in existingNames }
+      val acceptedKeys = selectedItems.map { it.name.trim().lowercase(Locale.ROOT) }.toSet()
+
+      if (freshToAdd.isEmpty()) {
+        removeRecommendedKeysFromState(tripId, acceptedKeys)
+        _toastMessage.value = "Selected item(s) are already in your checklist."
+        return@launch
+      }
+
+      repository.addPackingItemsBatch(tripId, freshToAdd)
+        .onSuccess { added ->
+          removeRecommendedKeysFromState(tripId, acceptedKeys)
+          _toastMessage.value = "Added $added recommended item(s) to checklist."
+        }
+        .onFailure { err ->
+          _toastMessage.value = err.localizedMessage ?: "Failed to add recommended items."
+        }
+    }
+  }
+
+  fun dismissRecommendedItem(tripId: String, itemName: String) {
+    val key = itemName.trim().lowercase(Locale.ROOT)
+    if (key.isBlank()) return
+    removeRecommendedKeysFromState(tripId, setOf(key))
+  }
+
+  fun clearAiRecommendationsError(tripId: String) {
+    if (_tripAiRecommendationsState.value[tripId] is UiState.Error) {
+      _tripAiRecommendationsState.value = _tripAiRecommendationsState.value - tripId
+    }
+  }
+
+  private fun removeRecommendedKeysFromState(tripId: String, keysToRemove: Set<String>) {
+    val current = _tripAiRecommendationsState.value[tripId] as? UiState.Success ?: return
+    val remaining = current.data.items.filterNot {
+      it.name.trim().lowercase(Locale.ROOT) in keysToRemove
+    }
+    _tripAiRecommendationsState.value = _tripAiRecommendationsState.value + (
+      tripId to UiState.Success(current.data.copy(items = remaining))
+    )
+  }
+
+  fun generateTravelGuideForTrip(trip: Trip) {
+    if (_tripGuideLoadingState.value[trip.id] is UiState.Loading) return
+    viewModelScope.launch {
+      _tripGuideLoadingState.value = _tripGuideLoadingState.value + (trip.id to UiState.Loading)
+      val home = homeCountry.value
+      val isIntl = HomeBasePreferences.isTripInternational(home, trip.country)
+      aiChecklistGenerator.generateTravelGuideOnly(
+        destination = trip.destination,
+        country = trip.country,
+        dateRangeLabel = formatTripDateRange(trip),
+        activities = trip.activities,
+        homeCountry = home.countryName,
+        isInternationalOverride = isIntl,
+      ).onSuccess { guide ->
+        repository.updateTripTravelGuide(trip.id, guide)
+          .onSuccess {
+            _tripGuideLoadingState.value = _tripGuideLoadingState.value - trip.id
+            _toastMessage.value = "Updated Destination Guide for ${trip.destination}."
+          }
+          .onFailure { err ->
+            _tripGuideLoadingState.value = _tripGuideLoadingState.value + (
+              trip.id to UiState.Error(err.localizedMessage ?: "Failed to save Destination Guide.")
+            )
+          }
+      }.onFailure { err ->
+        _tripGuideLoadingState.value = _tripGuideLoadingState.value + (
+          trip.id to UiState.Error(err.localizedMessage ?: "Could not load Destination Guide.")
+        )
+      }
+    }
+  }
+
+  fun clearTripGuideError(tripId: String) {
+    if (_tripGuideLoadingState.value[tripId] is UiState.Error) {
+      _tripGuideLoadingState.value = _tripGuideLoadingState.value - tripId
+    }
+  }
+
+  fun dismissGuideAttraction(trip: Trip, attraction: AttractionSuggestion) {
+    val guide = trip.travelGuide ?: return
+    val remaining = guide.nearbyAttractions.filterNot {
+      it.name == attraction.name && it.area == attraction.area
+    }
+    if (remaining.size == guide.nearbyAttractions.size) return
+    val updatedGuide = guide.copy(nearbyAttractions = remaining)
+    viewModelScope.launch {
+      repository.updateTripTravelGuide(trip.id, updatedGuide)
+        .onSuccess {
+          _toastMessage.value = "Dismissed \"${attraction.name}\"."
+        }
+        .onFailure { err ->
+          _toastMessage.value = err.localizedMessage ?: "Failed to dismiss attraction."
+        }
+    }
+  }
+
+  fun addSuggestedGuideItem(
+    tripId: String,
+    name: String,
+    category: String,
+    reason: String,
+  ) {
+    val trimmed = name.trim()
+    if (trimmed.isBlank()) return
+    val existingNames = (selectedTripItemsState.value as? UiState.Success)
+      ?.data?.map { it.name.trim().lowercase(Locale.ROOT) }?.toSet().orEmpty()
+    if (trimmed.lowercase(Locale.ROOT) in existingNames) {
+      _toastMessage.value = "\"$trimmed\" is already in your checklist."
+      return
+    }
+    viewModelScope.launch {
+      repository.addPackingItem(
+        tripId = tripId,
+        item = DraftPackingItem(
+          name = trimmed,
+          category = category.ifBlank { "Tech" },
+          quantity = 1L,
+          isAlwaysBring = false,
+          contextReason = reason.take(180),
+          sourceType = "ai",
+        ),
+      ).onSuccess {
+        removeRecommendedKeysFromState(tripId, setOf(trimmed.lowercase(Locale.ROOT)))
+        _toastMessage.value = "Added \"$trimmed\" to checklist."
+      }.onFailure { err ->
+        _toastMessage.value = err.localizedMessage ?: "Failed to add suggested item."
+      }
+    }
+  }
+
+  private fun formatTripDateRange(trip: Trip): String {
+    val fmt = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.US)
+    val start = LocalDate.ofEpochDay(trip.startDateEpochDay).format(fmt)
+    val end = LocalDate.ofEpochDay(trip.endDateEpochDay).format(fmt)
+    return "$start to $end"
+  }
+
+  fun createTripWithoutAi(
+    weatherNotificationsEnabled: Boolean,
+    onCreated: (String) -> Unit,
+  ) {
+    val destText = _destinationQuery.value.trim()
+    if (destText.isBlank()) {
+      _toastMessage.value = "Please enter or select a destination first."
+      return
+    }
+    if (_plannerGenerationState.value is UiState.Loading) return
+
+    viewModelScope.launch {
+      _plannerGenerationState.value = UiState.Loading
+
+      var place = _selectedPlace.value
+      if (place == null) {
+        place = withTimeoutOrNull(6_000L) {
+          weatherRepository.searchDestinations(destText).getOrNull()?.firstOrNull()
+        }
+        if (place != null) _selectedPlace.value = place
+      }
+
+      var forecast = (_weatherForecastState.value as? UiState.Success)?.data
+      if (forecast == null && place != null) {
+        forecast = withTimeoutOrNull(6_000L) {
+          weatherRepository.fetchForecastForTrip(
+            latitude = place.latitude,
+            longitude = place.longitude,
+            startEpochDay = _startEpochDay.value,
+            endEpochDay = _endEpochDay.value,
+          ).getOrNull()
+        }
+        if (forecast != null) _weatherForecastState.value = UiState.Success(forecast)
+      }
+
+      val durationDays = ((_endEpochDay.value - _startEpochDay.value) + 1L).coerceAtLeast(1L)
+      val knownAlwaysBring = (alwaysBringState.value as? UiState.Success)?.data.orEmpty()
+      val events = _calendarEvents.value
+      val activities = _selectedActivities.value.toList()
+      val draftItems = mutableListOf<DraftPackingItem>()
+      val seenNames = mutableSetOf<String>()
+
+      forecast?.recommendedGear.orEmpty().forEach { gear ->
+        if (seenNames.add(gear.lowercase(Locale.ROOT))) {
+          draftItems.add(
+            DraftPackingItem(
+              name = gear,
+              category = "Weather Gear",
+              quantity = 1L,
+              isAlwaysBring = false,
+              contextReason = forecast?.alertMessage?.ifBlank { forecast.summaryText } ?: "Live weather forecast",
+              sourceType = "weather",
+            )
+          )
+        }
+      }
+
+      events.forEach { ev ->
+        ev.suggestedItems.forEach { gear ->
+          if (seenNames.add(gear.lowercase(Locale.ROOT))) {
+            draftItems.add(
+              DraftPackingItem(
+                name = gear,
+                category = "Activity Gear",
+                quantity = 1L,
+                isAlwaysBring = false,
+                contextReason = "Event: ${ev.title}",
+                sourceType = "calendar",
+              )
+            )
+          }
+        }
+      }
+
+      val calSummary = events.map { ev ->
+        if (ev.location.isNotBlank()) "${ev.title} (${ev.location})" else ev.title
+      }
+      val resolvedDest = place?.name ?: destText
+      val resolvedCountry = place?.country.orEmpty()
+      val headerPhotoUrl = withTimeoutOrNull(2_500L) {
+        destinationPhotoRepository.fetchDestinationPhotoUrl(resolvedDest, resolvedCountry)
+      }.orEmpty()
+
+      repository.createTripWithItems(
+        destination = resolvedDest,
+        country = resolvedCountry,
+        latitude = place?.latitude ?: 0.0,
+        longitude = place?.longitude ?: 0.0,
+        startDateEpochDay = _startEpochDay.value,
+        endDateEpochDay = _endEpochDay.value,
+        durationDays = durationDays,
+        activities = activities,
+        calendarEventsSummary = calSummary,
+        weatherSummary = forecast?.summaryText ?: "Seasonal weather (coordinates pending)",
+        weatherTempMinC = forecast?.tempMinC ?: 0.0,
+        weatherTempMaxC = forecast?.tempMaxC ?: 0.0,
+        weatherRainProbMax = forecast?.rainProbMax ?: 0L,
+        weatherAlertActive = forecast?.alertActive ?: false,
+        weatherAlertMessage = forecast?.alertMessage.orEmpty(),
+        weatherNotificationsEnabled = weatherNotificationsEnabled,
+        draftItems = draftItems,
+        knownAlwaysBring = knownAlwaysBring,
+        headerImageUrl = headerPhotoUrl,
+      ).onSuccess { newTripId ->
+        _plannerGenerationState.value = UiState.Success(newTripId)
+        _selectedTripId.value = newTripId
+        if (headerPhotoUrl.isBlank()) {
+          ensureTripHeaderPhotos(listOf(Trip(id = newTripId, destination = resolvedDest, country = resolvedCountry)))
+        }
+        onCreated(newTripId)
+      }.onFailure { err ->
+        _plannerGenerationState.value = UiState.Error(err.localizedMessage ?: "Failed to save trip.")
+      }
+    }
+  }
 
   fun toggleItemPacked(tripId: String, item: PackingItem) {
     viewModelScope.launch {
@@ -456,34 +1033,50 @@ class PackWiseViewModel(
     tripId: String,
     name: String,
     category: String,
+    reason: String,
     quantity: Long,
-    alsoSaveAsAlwaysBring: Boolean,
+    scope: TripItemScope,
   ) {
-    val clean = name.trim()
-    if (clean.isBlank()) return
+    val trimmed = name.trim()
+    if (trimmed.isBlank()) return
     viewModelScope.launch {
-      if (alsoSaveAsAlwaysBring) {
-        repository.addAlwaysBringItem(clean, category, quantity, "Added from trip", "custom")
+      val resolvedCategory = when (scope) {
+        TripItemScope.ALWAYS_DO -> CATEGORY_ALWAYS_DO
+        else -> category.trim().ifBlank { "Essentials" }
       }
-      repository.addPackingItem(
-        tripId = tripId,
-        draft = DraftPackingItem(
-          name = clean,
-          category = category,
-          quantity = quantity,
-          isAlwaysBring = alsoSaveAsAlwaysBring,
-          contextReason = if (alsoSaveAsAlwaysBring) "Always Bring essential" else "Added manually",
-          sourceType = if (alsoSaveAsAlwaysBring) "always_bring" else "custom",
-        )
-      ).onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to add item." }
-    }
-  }
-
-  fun promoteToAlwaysBring(tripId: String, item: PackingItem) {
-    viewModelScope.launch {
-      repository.promoteItemToAlwaysBring(tripId, item)
-        .onSuccess { _toastMessage.value = "\"${item.name}\" added to Always Bring vault." }
-        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to promote item." }
+      val resolvedSourceType = when (scope) {
+        TripItemScope.ALWAYS_DO -> SOURCE_ALWAYS_DO
+        TripItemScope.ALWAYS_BRING -> SOURCE_ALWAYS_BRING
+        TripItemScope.TRIP_SPECIFIC -> "manual"
+      }
+      val resolvedReason = reason.trim().ifBlank {
+        when (scope) {
+          TripItemScope.ALWAYS_DO -> "Before leaving home on every trip"
+          TripItemScope.ALWAYS_BRING -> "Always Bring essential"
+          TripItemScope.TRIP_SPECIFIC -> "Added manually"
+        }
+      }
+      val draft = DraftPackingItem(
+        name = trimmed,
+        category = resolvedCategory,
+        quantity = if (scope == TripItemScope.ALWAYS_DO) 1L else quantity.coerceIn(1L, 99L),
+        isAlwaysBring = scope == TripItemScope.ALWAYS_BRING,
+        contextReason = resolvedReason,
+        sourceType = resolvedSourceType,
+      )
+      repository.addPackingItem(tripId, draft)
+        .onSuccess {
+          when (scope) {
+            TripItemScope.ALWAYS_BRING -> {
+              repository.addAlwaysBringItem(trimmed, resolvedCategory, quantity, "Added from trip", "custom")
+            }
+            TripItemScope.ALWAYS_DO -> {
+              repository.addAlwaysBringItem(trimmed, CATEGORY_ALWAYS_DO, 1L, resolvedReason, SOURCE_ALWAYS_DO)
+            }
+            TripItemScope.TRIP_SPECIFIC -> Unit
+          }
+        }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to add item." }
     }
   }
 
@@ -494,9 +1087,30 @@ class PackWiseViewModel(
     }
   }
 
+  fun recategorizeTripItem(
+    tripId: String,
+    item: PackingItem,
+    newScope: TripItemScope,
+    newCategory: String,
+    saveToVault: Boolean,
+  ) {
+    viewModelScope.launch {
+      repository.recategorizeTripItem(tripId, item, newScope, newCategory, saveToVault)
+        .onSuccess {
+          val label = when (newScope) {
+            TripItemScope.ALWAYS_DO -> "Always-Do"
+            TripItemScope.ALWAYS_BRING -> "Always Bring ($newCategory)"
+            TripItemScope.TRIP_SPECIFIC -> newCategory.ifBlank { "Trip-Specific" }
+          }
+          _toastMessage.value = "Moved \"${item.name}\" to $label"
+        }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to recategorize item." }
+    }
+  }
+
   fun refreshLiveWeatherForTrip(
     trip: Trip,
-    onAlertTriggered: (String, String) -> Unit = { _, _ -> },
+    onAlertTriggered: (String, WeatherForecastSummary) -> Unit = { _, _ -> },
   ) {
     if (trip.latitude == 0.0 && trip.longitude == 0.0) {
       _toastMessage.value = "No coordinates saved for ${trip.destination}."
@@ -510,29 +1124,39 @@ class PackWiseViewModel(
         endEpochDay = trip.endDateEpochDay,
       ).onSuccess { forecast ->
         repository.updateTripWeather(trip.id, forecast)
-        if (forecast.alertActive && forecast.alertMessage.isNotBlank()) {
+        if (forecast.alertActive && trip.weatherNotificationsEnabled) {
+          onAlertTriggered(forecast.alertMessage, forecast)
           _toastMessage.value = "Weather Alert: ${forecast.alertMessage}"
-          onAlertTriggered(trip.destination, forecast.alertMessage)
         } else {
           _toastMessage.value = "Forecast updated: ${forecast.summaryText}"
         }
       }.onFailure { err ->
-        _toastMessage.value = "Weather refresh failed: ${err.localizedMessage}"
+        _toastMessage.value = "Weather refresh failed: ${err.localizedMessage ?: "Network error"}"
       }
     }
   }
 
   fun addWeatherGearToTrip(tripId: String, forecast: WeatherForecastSummary) {
-    viewModelScope.launch {
-      val existingNames = ((selectedTripItemsState.value as? UiState.Success)?.data.orEmpty())
-        .map { it.name.lowercase() }
-        .toSet()
-      val missing = forecast.recommendedGear.filter { it.name.lowercase() !in existingNames }
-      if (missing.isEmpty()) {
-        _toastMessage.value = "All weather-recommended gear is already on your list."
-        return@launch
+    val existingNames = (selectedTripItemsState.value as? UiState.Success)
+      ?.data?.map { it.name.lowercase(Locale.ROOT) }?.toSet().orEmpty()
+    val drafts = forecast.recommendedGear
+      .filter { it.lowercase(Locale.ROOT) !in existingNames }
+      .map { gear ->
+        DraftPackingItem(
+          name = gear,
+          category = "Weather Gear",
+          quantity = 1L,
+          isAlwaysBring = false,
+          contextReason = forecast.alertMessage.ifBlank { forecast.summaryText },
+          sourceType = "weather",
+        )
       }
-      repository.addPackingItemsBatch(tripId, missing)
+    if (drafts.isEmpty()) {
+      _toastMessage.value = "All weather-recommended gear is already on your list."
+      return
+    }
+    viewModelScope.launch {
+      repository.addPackingItemsBatch(tripId, drafts)
         .onSuccess { count -> _toastMessage.value = "Added $count weather item(s) to checklist." }
         .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to add weather gear." }
     }
@@ -541,17 +1165,18 @@ class PackWiseViewModel(
   fun toggleTripWeatherNotifications(trip: Trip, enabled: Boolean) {
     viewModelScope.launch {
       repository.updateTripNotifications(trip.id, enabled)
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to update notification setting." }
     }
   }
 
-  fun completeAndResetTrip(trip: Trip, items: List<PackingItem>, reopenImmediately: Boolean) {
+  fun completeAndResetTrip(trip: Trip, items: List<PackingItem>, markCompletedStatus: Boolean) {
     viewModelScope.launch {
-      repository.completeAndResetTrip(trip, items, reopenImmediately)
+      repository.completeAndResetTrip(trip, items, markCompletedStatus)
         .onSuccess {
-          _toastMessage.value = if (reopenImmediately) {
-            "All items unchecked — ${trip.destination} list is fresh for your next journey!"
-          } else {
+          _toastMessage.value = if (markCompletedStatus) {
             "Trip completed & checklist reset fresh for next time!"
+          } else {
+            "All items unchecked — ${trip.destination} list is fresh for your next journey!"
           }
         }
         .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to reset trip." }
@@ -570,14 +1195,63 @@ class PackWiseViewModel(
     }
   }
 
-  // --- ALWAYS BRING VAULT ACTIONS ---
-
   fun addAlwaysBringItem(name: String, category: String, quantity: Long, notes: String) {
-    if (name.isBlank()) return
+    val trimmed = name.trim()
+    if (trimmed.isBlank()) return
     viewModelScope.launch {
-      repository.addAlwaysBringItem(name, category, quantity, notes, "custom")
-        .onSuccess { _toastMessage.value = "Saved \"$name\" to Always Bring." }
+      val cleanCategory = category.trim().ifBlank { "Essentials" }
+      val isAlwaysDo = cleanCategory.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)
+      repository.addAlwaysBringItem(
+        name = trimmed,
+        category = if (isAlwaysDo) CATEGORY_ALWAYS_DO else cleanCategory,
+        quantity = if (isAlwaysDo) 1L else quantity,
+        notes = notes.ifBlank { if (isAlwaysDo) "Before leaving home on every trip" else "Always bring on every trip" },
+        source = if (isAlwaysDo) SOURCE_ALWAYS_DO else "custom",
+      )
+        .onSuccess {
+          _toastMessage.value = if (isAlwaysDo) {
+            "Saved \"$trimmed\" to Always-Do tasks."
+          } else {
+            "Saved \"$trimmed\" to Always Bring."
+          }
+        }
         .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to save item." }
+    }
+  }
+
+  fun addAlwaysDoTask(name: String, notes: String) {
+    val trimmed = name.trim()
+    if (trimmed.isBlank()) return
+    viewModelScope.launch {
+      repository.addAlwaysBringItem(
+        name = trimmed,
+        category = CATEGORY_ALWAYS_DO,
+        quantity = 1L,
+        notes = notes.trim().ifBlank { "Before leaving home on every trip" },
+        source = SOURCE_ALWAYS_DO,
+      )
+        .onSuccess { _toastMessage.value = "Saved \"$trimmed\" to Always-Do tasks." }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to save Always-Do task." }
+    }
+  }
+
+  fun recategorizeVaultItem(
+    item: AlwaysBringItem,
+    targetType: VaultItemType,
+    newCategory: String,
+    newNotes: String,
+  ) {
+    viewModelScope.launch {
+      repository.recategorizeVaultItem(item, targetType, newCategory, newNotes)
+        .onSuccess {
+          val dest = if (targetType == VaultItemType.ALWAYS_DO) {
+            "Always-Do tasks"
+          } else {
+            "Always Bring (${newCategory.ifBlank { "Essentials" }})"
+          }
+          _toastMessage.value = "Moved \"${item.name}\" to $dest"
+        }
+        .onFailure { _toastMessage.value = it.localizedMessage ?: "Failed to update item." }
     }
   }
 
@@ -588,14 +1262,7 @@ class PackWiseViewModel(
     }
   }
 
-  // --- GOOGLE TASKS IMPORT ---
-
   fun connectAndLoadGoogleTasks(activity: Activity) {
-    val cachedToken = _googleTasksAccessToken.value
-    if (!cachedToken.isNullOrBlank()) {
-      loadTaskListsWithToken(cachedToken)
-      return
-    }
     viewModelScope.launch {
       _googleTaskListsState.value = UiState.Loading
       workspaceRepository.authorizeScopes(
@@ -613,8 +1280,27 @@ class PackWiseViewModel(
         }
       }.onFailure { err ->
         _googleTaskListsState.value = UiState.Error(
-          err.localizedMessage ?: "Could not connect to Google Tasks."
+          err.localizedMessage ?: "Failed to connect Google Tasks."
         )
+      }
+    }
+  }
+
+  fun fetchGoogleCalendarEvents(activity: Activity) {
+    viewModelScope.launch {
+      _calendarStatusMessage.value = "Authorizing Google Calendar..."
+      workspaceRepository.authorizeScopes(
+        activity = activity,
+        scopes = listOf(GoogleWorkspaceRepository.SCOPE_CALENDAR_READONLY),
+      ).onSuccess { state ->
+        when (state) {
+          is WorkspaceAuthState.Authorized -> loadGoogleCalendarWithToken(state.accessToken)
+          is WorkspaceAuthState.NeedsConsent -> {
+            _pendingConsentIntent.value = GoogleWorkspacePendingAction.CALENDAR to state.pendingIntent
+          }
+        }
+      }.onFailure { err ->
+        _calendarStatusMessage.value = err.localizedMessage ?: "Google Calendar authorization failed."
       }
     }
   }
@@ -627,26 +1313,26 @@ class PackWiseViewModel(
   ) {
     _pendingConsentIntent.value = null
     if (resultCode != Activity.RESULT_OK || data == null) {
-      if (action == GoogleWorkspacePendingAction.TASKS) {
-        _googleTaskListsState.value = UiState.Error(
-          "Google Tasks sign-in was cancelled or blocked by Google's unverified-app security check. " +
-            "Add your email as a Test User in Google Cloud Console (OAuth Consent Screen) and enable Google Tasks API, " +
-            "or switch to \"Paste / File Import\" right away."
-        )
+      val cancelMsg = if (action == GoogleWorkspacePendingAction.TASKS) {
+        "Google Tasks authorization was cancelled. Switch to the \"Paste or File\" tab to import your list right now."
       } else {
-        _calendarStatusMessage.value =
-          "Google Calendar OAuth was cancelled or blocked by Google security checks. Use \"Device Calendars\" on the left to read your synced Google Calendar without OAuth."
+        "Google Calendar OAuth was cancelled or blocked by Google security checks. Use \"Device Calendars\" on the left to read your synced Google Calendar without OAuth."
+      }
+      if (action == GoogleWorkspacePendingAction.TASKS) {
+        _googleTaskListsState.value = UiState.Error(cancelMsg)
+      } else {
+        _calendarStatusMessage.value = cancelMsg
       }
       return
     }
+
     workspaceRepository.extractAccessTokenFromIntent(activity, data)
       .onSuccess { token ->
-        when (action) {
-          GoogleWorkspacePendingAction.TASKS -> {
-            _googleTasksAccessToken.value = token
-            loadTaskListsWithToken(token)
-          }
-          GoogleWorkspacePendingAction.CALENDAR -> loadGoogleCalendarWithToken(token)
+        if (action == GoogleWorkspacePendingAction.TASKS) {
+          _googleTasksAccessToken.value = token
+          loadTaskListsWithToken(token)
+        } else {
+          loadGoogleCalendarWithToken(token)
         }
       }
       .onFailure { err ->
@@ -657,6 +1343,24 @@ class PackWiseViewModel(
           _calendarStatusMessage.value = msg
         }
       }
+  }
+
+  private fun loadGoogleCalendarWithToken(token: String) {
+    viewModelScope.launch {
+      workspaceRepository.fetchGoogleCalendarEvents(token, _startEpochDay.value, _endEpochDay.value)
+        .onSuccess { events ->
+          val merged = (_calendarEvents.value + events).distinctBy { "${it.title}_${it.startEpochMillis}" }
+          _calendarEvents.value = merged
+          _calendarStatusMessage.value = if (events.isEmpty()) {
+            "Connected to Google Calendar (no events in selected date range)."
+          } else {
+            "Loaded ${events.size} planned event(s) from Google Calendar."
+          }
+        }
+        .onFailure { err ->
+          _calendarStatusMessage.value = err.localizedMessage ?: "Failed to load Google Calendar events."
+        }
+    }
   }
 
   private fun loadTaskListsWithToken(token: String) {
@@ -694,38 +1398,61 @@ class PackWiseViewModel(
   fun importGoogleTasks(
     tasks: List<GoogleTaskItemInfo>,
     targetTripId: String?,
-    importAsAlwaysBring: Boolean,
+    target: TasksImportTarget,
     onDone: () -> Unit,
   ) {
     if (tasks.isEmpty()) return
     viewModelScope.launch {
-      if (importAsAlwaysBring || targetTripId.isNullOrBlank()) {
-        val triples = tasks.map { Triple(it.title, "Imported", it.notes) }
-        repository.addAlwaysBringItemsBatch(triples)
-          .onSuccess { count ->
-            _toastMessage.value = "Imported $count item(s) into Always Bring vault."
-            onDone()
-          }
-          .onFailure { _toastMessage.value = it.localizedMessage ?: "Import failed." }
+      val effectiveTarget = if (targetTripId.isNullOrBlank() && target == TasksImportTarget.SELECTED_TRIP) {
+        TasksImportTarget.ALWAYS_BRING
       } else {
-        val drafts = tasks.map { task ->
-          DraftPackingItem(
-            name = task.title,
-            category = "Imported",
-            quantity = 1L,
-            isAlwaysBring = false,
-            contextReason = if (task.notes.isNotBlank()) "Google Tasks: ${task.notes}" else "Imported from Google Tasks",
-            sourceType = "google_tasks",
-          )
+        target
+      }
+      when (effectiveTarget) {
+        TasksImportTarget.ALWAYS_DO -> {
+          val triples = tasks.map { Triple(it.title, CATEGORY_ALWAYS_DO, it.notes) }
+          repository.addAlwaysBringItemsBatch(triples, isAlwaysDo = true)
+            .onSuccess { count ->
+              _toastMessage.value = "Imported $count Always-Do task(s)."
+              onDone()
+            }
+            .onFailure { _toastMessage.value = it.localizedMessage ?: "Import failed." }
         }
-        repository.addPackingItemsBatch(targetTripId, drafts)
-          .onSuccess { count ->
-            _toastMessage.value = "Imported $count item(s) from Google Tasks!"
-            onDone()
+        TasksImportTarget.ALWAYS_BRING -> {
+          val triples = tasks.map { Triple(it.title, "Imported", it.notes) }
+          repository.addAlwaysBringItemsBatch(triples, isAlwaysDo = false)
+            .onSuccess { count ->
+              _toastMessage.value = "Imported $count item(s) into Always Bring vault."
+              onDone()
+            }
+            .onFailure { _toastMessage.value = it.localizedMessage ?: "Import failed." }
+        }
+        TasksImportTarget.SELECTED_TRIP -> {
+          val tripId = targetTripId ?: return@launch
+          val drafts = tasks.map { task ->
+            DraftPackingItem(
+              name = task.title,
+              category = "Imported",
+              quantity = 1L,
+              isAlwaysBring = false,
+              contextReason = if (task.notes.isNotBlank()) "Google Tasks: ${task.notes}" else "Imported from Google Tasks",
+              sourceType = "google_tasks",
+            )
           }
-          .onFailure { _toastMessage.value = it.localizedMessage ?: "Import failed." }
+          repository.addPackingItemsBatch(tripId, drafts)
+            .onSuccess { count ->
+              _toastMessage.value = "Imported $count item(s) from Google Tasks!"
+              onDone()
+            }
+            .onFailure { _toastMessage.value = it.localizedMessage ?: "Import failed." }
+        }
       }
     }
+  }
+
+  override fun onCleared() {
+    super.onCleared()
+    aiChecklistGenerator.close()
   }
 
   private companion object {

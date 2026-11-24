@@ -11,7 +11,6 @@ import com.example.data.model.GoogleTaskListInfo
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.ApiException
-import com.google.android.gms.common.api.CommonStatusCodes
 import com.google.android.gms.common.api.Scope
 import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
@@ -21,7 +20,6 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import org.json.JSONArray
 import org.json.JSONObject
-import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.GET
@@ -41,20 +39,23 @@ data class GoogleTaskListsResponse(
 @JsonClass(generateAdapter = true)
 data class GoogleTaskListDto(
   val id: String = "",
-  val title: String = "",
+  val title: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
 data class GoogleTasksResponse(
-  val items: List<GoogleTaskItemDto>? = null,
+  val items: List<GoogleTaskDto>? = null,
+  val nextPageToken: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
-data class GoogleTaskItemDto(
+data class GoogleTaskDto(
   val id: String = "",
   val title: String? = null,
   val notes: String? = null,
   val status: String? = null,
+  val hidden: Boolean? = null,
+  val deleted: Boolean? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -64,7 +65,7 @@ data class GoogleCalendarEventsResponse(
 
 @JsonClass(generateAdapter = true)
 data class GoogleCalendarEventDto(
-  val id: String = "",
+  val id: String? = null,
   val summary: String? = null,
   val location: String? = null,
   val start: GoogleCalendarDateTimeDto? = null,
@@ -77,31 +78,33 @@ data class GoogleCalendarDateTimeDto(
   val date: String? = null,
 )
 
-interface GoogleTasksApi {
+interface GoogleTasksRestApi {
   @GET("tasks/v1/users/@me/lists")
-  suspend fun getTaskLists(
+  suspend fun listTaskLists(
     @Header("Authorization") bearerToken: String,
-    @Query("maxResults") maxResults: Int = 30,
+    @Query("maxResults") maxResults: Int = 20,
   ): GoogleTaskListsResponse
 
-  @GET("tasks/v1/lists/{tasklistId}/tasks")
-  suspend fun getTasks(
+  @GET("tasks/v1/lists/{taskListId}/tasks")
+  suspend fun listTasks(
     @Header("Authorization") bearerToken: String,
-    @Path("tasklistId") tasklistId: String,
+    @Path("taskListId") taskListId: String,
     @Query("showCompleted") showCompleted: Boolean = true,
+    @Query("showHidden") showHidden: Boolean = true,
     @Query("maxResults") maxResults: Int = 100,
+    @Query("pageToken") pageToken: String? = null,
   ): GoogleTasksResponse
 }
 
-interface GoogleCalendarApi {
+interface GoogleCalendarRestApi {
   @GET("calendar/v3/calendars/primary/events")
-  suspend fun getEvents(
+  suspend fun listEvents(
     @Header("Authorization") bearerToken: String,
     @Query("timeMin") timeMinIso: String,
     @Query("timeMax") timeMaxIso: String,
     @Query("singleEvents") singleEvents: Boolean = true,
     @Query("orderBy") orderBy: String = "startTime",
-    @Query("maxResults") maxResults: Int = 25,
+    @Query("maxResults") maxResults: Int = 30,
   ): GoogleCalendarEventsResponse
 }
 
@@ -110,83 +113,120 @@ sealed interface WorkspaceAuthState {
   data class NeedsConsent(val pendingIntent: PendingIntent) : WorkspaceAuthState
 }
 
-class GoogleWorkspaceRepository {
+class GoogleWorkspaceRepository(
+  tasksBaseUrl: String = "https://tasks.googleapis.com/",
+  calendarBaseUrl: String = "https://www.googleapis.com/",
+  client: OkHttpClient = defaultOkHttpClient(),
+) {
+
   private val moshi: Moshi = Moshi.Builder()
     .addLast(KotlinJsonAdapterFactory())
     .build()
 
-  private val client: OkHttpClient = OkHttpClient.Builder()
-    .connectTimeout(15, TimeUnit.SECONDS)
-    .readTimeout(15, TimeUnit.SECONDS)
-    .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
-    .build()
-
-  private val tasksApi: GoogleTasksApi = Retrofit.Builder()
-    .baseUrl("https://tasks.googleapis.com/")
+  private val tasksApi: GoogleTasksRestApi = Retrofit.Builder()
+    .baseUrl(tasksBaseUrl)
     .client(client)
     .addConverterFactory(MoshiConverterFactory.create(moshi))
     .build()
-    .create(GoogleTasksApi::class.java)
+    .create(GoogleTasksRestApi::class.java)
 
-  private val calendarApi: GoogleCalendarApi = Retrofit.Builder()
-    .baseUrl("https://www.googleapis.com/")
+  private val calendarApi: GoogleCalendarRestApi = Retrofit.Builder()
+    .baseUrl(calendarBaseUrl)
     .client(client)
     .addConverterFactory(MoshiConverterFactory.create(moshi))
     .build()
-    .create(GoogleCalendarApi::class.java)
+    .create(GoogleCalendarRestApi::class.java)
 
   suspend fun authorizeScopes(
     activity: Activity,
     scopes: List<String>,
-  ): Result<WorkspaceAuthState> = runCatching {
-    val authRequest = AuthorizationRequest.builder()
-      .setRequestedScopes(scopes.map { Scope(it) })
-      .build()
-    val result = Identity.getAuthorizationClient(activity)
-      .authorize(authRequest)
-      .await()
-    if (result.hasResolution()) {
-      val pi = result.pendingIntent
-        ?: throw IllegalStateException("Authorization required, but no consent prompt was provided.")
-      WorkspaceAuthState.NeedsConsent(pi)
-    } else {
-      val token = result.accessToken
-        ?: throw IllegalStateException("Google authorization returned an empty access token.")
-      WorkspaceAuthState.Authorized(token)
+  ): Result<WorkspaceAuthState> {
+    return try {
+      val req = AuthorizationRequest.builder()
+        .setRequestedScopes(scopes.map { Scope(it) })
+        .build()
+      val authResult = Identity.getAuthorizationClient(activity).authorize(req).await()
+      if (authResult.hasResolution() && authResult.pendingIntent != null) {
+        Result.success(WorkspaceAuthState.NeedsConsent(authResult.pendingIntent!!))
+      } else {
+        val token = authResult.accessToken
+        if (token.isNullOrBlank()) {
+          Result.failure(IllegalStateException("Google did not return an OAuth access token."))
+        } else {
+          Result.success(WorkspaceAuthState.Authorized(token))
+        }
+      }
+    } catch (e: ApiException) {
+      Log.w(TAG, "Google authorization failed with code ${e.statusCode}", e)
+      Result.failure(
+        IllegalStateException("Google OAuth unavailable on this build (code ${e.statusCode}). Use Paste or File import or Device Calendars.")
+      )
+    } catch (e: Exception) {
+      Log.w(TAG, "Google authorization error", e)
+      Result.failure(e)
     }
-  }.recoverCatching { err ->
-    throw IllegalStateException(formatWorkspaceError(err, scopes), err)
   }
 
-  fun extractAccessTokenFromIntent(activity: Activity, data: Intent?): Result<String> = runCatching {
-    val result = Identity.getAuthorizationClient(activity)
-      .getAuthorizationResultFromIntent(data)
-    result.accessToken ?: throw IllegalStateException("No access token in authorization result.")
-  }.recoverCatching { err ->
-    throw IllegalStateException(formatWorkspaceError(err, emptyList()), err)
+  fun extractAccessTokenFromIntent(activity: Activity, data: Intent?): Result<String> {
+    return try {
+      val result = Identity.getAuthorizationClient(activity).getAuthorizationResultFromIntent(data)
+      val token = result.accessToken
+      if (token.isNullOrBlank()) {
+        Result.failure(IllegalStateException("No access token granted in authorization response."))
+      } else {
+        Result.success(token)
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to parse authorization intent result", e)
+      Result.failure(e)
+    }
   }
 
   suspend fun fetchGoogleTaskLists(accessToken: String): Result<List<GoogleTaskListInfo>> = runCatching {
-    val response = tasksApi.getTaskLists("Bearer $accessToken")
-    response.items.orEmpty().map { GoogleTaskListInfo(id = it.id, title = it.title.ifBlank { "Untitled List" }) }
-  }.recoverCatching { err ->
-    throw IllegalStateException(formatApiFailure("Google Tasks", err), err)
-  }
-
-  suspend fun fetchTasksFromList(accessToken: String, listId: String): Result<List<GoogleTaskItemInfo>> = runCatching {
-    val response = tasksApi.getTasks("Bearer $accessToken", listId)
-    response.items.orEmpty()
-      .filter { !it.title.isNullOrBlank() }
+    val res = tasksApi.listTaskLists("Bearer $accessToken")
+    res.items.orEmpty()
+      .filter { it.id.isNotBlank() }
       .map { dto ->
-        GoogleTaskItemInfo(
+        GoogleTaskListInfo(
           id = dto.id,
-          title = dto.title.orEmpty().trim(),
-          notes = dto.notes.orEmpty().trim(),
-          isCompleted = dto.status == "completed",
+          title = dto.title?.ifBlank { "My Tasks" } ?: "My Tasks",
         )
       }
-  }.recoverCatching { err ->
-    throw IllegalStateException(formatApiFailure("Google Tasks", err), err)
+  }
+
+  suspend fun fetchTasksFromList(
+    accessToken: String,
+    taskListId: String,
+  ): Result<List<GoogleTaskItemInfo>> = runCatching {
+    val collected = mutableListOf<GoogleTaskItemInfo>()
+    var nextPageToken: String? = null
+    var pages = 0
+
+    do {
+      val res = tasksApi.listTasks(
+        bearerToken = "Bearer $accessToken",
+        taskListId = taskListId,
+        showCompleted = true,
+        showHidden = true,
+        pageToken = nextPageToken,
+      )
+      res.items.orEmpty()
+        .filter { it.deleted != true && !it.title.isNullOrBlank() }
+        .forEach { dto ->
+          collected.add(
+            GoogleTaskItemInfo(
+              id = dto.id.ifBlank { "${dto.title}_${collected.size}" },
+              title = dto.title!!.trim(),
+              notes = dto.notes.orEmpty().trim(),
+              isCompleted = dto.status == "completed",
+            )
+          )
+        }
+      nextPageToken = res.nextPageToken?.takeIf { it.isNotBlank() }
+      pages++
+    } while (nextPageToken != null && pages < 10)
+
+    collected
   }
 
   suspend fun fetchGoogleCalendarEvents(
@@ -196,16 +236,20 @@ class GoogleWorkspaceRepository {
   ): Result<List<CalendarEventInfo>> = runCatching {
     val timeMin = LocalDate.ofEpochDay(startEpochDay).atStartOfDay().toInstant(ZoneOffset.UTC).toString()
     val timeMax = LocalDate.ofEpochDay(endEpochDay).plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC).toString()
-    val response = calendarApi.getEvents("Bearer $accessToken", timeMin, timeMax)
-    response.items.orEmpty()
+    val res = calendarApi.listEvents(
+      bearerToken = "Bearer $accessToken",
+      timeMinIso = timeMin,
+      timeMaxIso = timeMax,
+    )
+    res.items.orEmpty()
       .filter { !it.summary.isNullOrBlank() }
       .map { dto ->
-        val title = dto.summary.orEmpty().trim()
+        val title = dto.summary!!.trim()
         val loc = dto.location.orEmpty().trim()
-        val startMs = parseEventMillis(dto.start)
-        val endMs = parseEventMillis(dto.end).coerceAtLeast(startMs)
+        val startMs = parseGoogleDateTime(dto.start)
+        val endMs = parseGoogleDateTime(dto.end)
         CalendarEventInfo(
-          id = dto.id,
+          id = dto.id ?: "${title}_$startMs",
           title = title,
           startEpochMillis = startMs,
           endEpochMillis = endMs,
@@ -214,64 +258,21 @@ class GoogleWorkspaceRepository {
           suggestedItems = DeviceCalendarReader.suggestItemsForEvent(title, loc),
         )
       }
-  }.recoverCatching { err ->
-    throw IllegalStateException(formatApiFailure("Google Calendar", err), err)
   }
 
-  private fun formatWorkspaceError(err: Throwable, scopes: List<String>): String {
-    val apiEx = generateSequence(err) { it.cause }.filterIsInstance<ApiException>().firstOrNull()
-    val statusCode = apiEx?.statusCode
-    Log.w(TAG, "Google Workspace OAuth error (status=$statusCode, scopes=$scopes): ${err.message}", err)
-
-    val isTasks = scopes.any { it.contains("tasks") }
-    val serviceName = if (isTasks) "Google Tasks" else "Google Workspace"
-
-    return when (statusCode) {
-      CommonStatusCodes.DEVELOPER_ERROR -> {
-        "Google blocked $serviceName OAuth (DEVELOPER_ERROR 10). On Android, OAuth uses the Cloud project owning package com.aistudio.packwise.trvlnx & its debug SHA-1 (gen-lang-client-0595459110), rather than a separate web OAuth project. " +
-          if (isTasks) "Use the \"Paste / File Import\" tab below to import your list right now."
-          else "Use \"Device Calendars\" to pull your synced Google Calendar without OAuth restrictions."
-      }
-      CommonStatusCodes.CANCELED -> {
-        "$serviceName sign-in was cancelled or blocked by Google's unverified-app security check. " +
-          "To allow direct OAuth, add your Google account as a Test User under OAuth Consent Screen and enable the Google Tasks/Calendar API in Google Cloud Console—or use " +
-          if (isTasks) "\"Paste / File Import\" below right away."
-          else "\"Device Calendars\" right away."
-      }
-      12500, CommonStatusCodes.SIGN_IN_REQUIRED -> {
-        "Google security blocked direct $serviceName access (code $statusCode). Sensitive Google Workspace scopes require either app verification or your email listed under Test Users on the Android app's Google Cloud OAuth consent screen. " +
-          if (isTasks) "Switch to \"Paste / File Import\" below to import your list immediately."
-          else "Use \"Device Calendars\" instead—it reads your synced Google Calendar natively."
-      }
-      else -> {
-        "Google $serviceName authorization was blocked${statusCode?.let { " (code $it)" } ?: ""}: ${err.localizedMessage ?: "Security / consent check failed"}. " +
-          if (isTasks) "Use \"Paste / File Import\" below to import items right away."
-          else "Use \"Device Calendars\" instead."
-      }
+  private fun parseGoogleDateTime(dto: GoogleCalendarDateTimeDto?): Long {
+    if (dto == null) return 0L
+    val dt = dto.dateTime
+    if (!dt.isNullOrBlank()) {
+      return runCatching { Instant.parse(dt).toEpochMilli() }.getOrDefault(0L)
     }
-  }
-
-  private fun formatApiFailure(serviceLabel: String, err: Throwable): String {
-    val httpEx = generateSequence(err) { it.cause }.filterIsInstance<HttpException>().firstOrNull()
-    Log.w(TAG, "$serviceLabel API error (http=${httpEx?.code()}): ${err.message}", err)
-    return when (httpEx?.code()) {
-      403 -> "$serviceLabel API returned 403 Forbidden. Enable the $serviceLabel API in your Google Cloud project and ensure your account is a Test User."
-      401 -> "$serviceLabel authorization expired. Tap Retry to re-authorize."
-      else -> "$serviceLabel request failed: ${err.localizedMessage ?: "Network error"}"
+    val d = dto.date
+    if (!d.isNullOrBlank()) {
+      return runCatching {
+        LocalDate.parse(d).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()
+      }.getOrDefault(0L)
     }
-  }
-
-  private fun parseEventMillis(dt: GoogleCalendarDateTimeDto?): Long {
-    if (dt == null) return System.currentTimeMillis()
-    dt.dateTime?.let {
-      runCatching { return Instant.parse(it).toEpochMilli() }
-    }
-    dt.date?.let {
-      runCatching {
-        return LocalDate.parse(it).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()
-      }
-    }
-    return System.currentTimeMillis()
+    return 0L
   }
 
   companion object {
@@ -279,102 +280,98 @@ class GoogleWorkspaceRepository {
     const val SCOPE_TASKS_READONLY = "https://www.googleapis.com/auth/tasks.readonly"
     const val SCOPE_CALENDAR_READONLY = "https://www.googleapis.com/auth/calendar.readonly"
 
-    /**
-     * Parses checklists copied from Google Tasks, Keep, Notes, or exported Google Takeout Tasks.json / .txt / .csv.
-     */
-    fun parseTasksFromText(rawText: String): List<GoogleTaskItemInfo> {
-      val trimmed = rawText.trim()
+    private fun defaultOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
+      .connectTimeout(15, TimeUnit.SECONDS)
+      .readTimeout(15, TimeUnit.SECONDS)
+      .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
+      .build()
+
+    fun parseTasksFromText(rawInput: String): List<GoogleTaskItemInfo> {
+      val trimmed = rawInput.trim()
       if (trimmed.isBlank()) return emptyList()
 
-      // Support Google Takeout Tasks.json or generic JSON task arrays
       if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        val jsonItems = parseTakeoutJson(trimmed)
-        if (jsonItems.isNotEmpty()) return jsonItems
+        val jsonParsed = tryParseTakeoutJson(trimmed)
+        if (jsonParsed.isNotEmpty()) return jsonParsed
       }
 
       val results = mutableListOf<GoogleTaskItemInfo>()
       val seen = mutableSetOf<String>()
+      val checkboxRegex = Regex("""^[-*•+]?\s*\[(x|X|\s)?\]\s*(.+)$""")
+      val bulletRegex = Regex("""^(?:[-*•+]|\d+[.)])\s+(.+)$""")
 
-      trimmed.lineSequence()
-        .map { it.trim() }
-        .filter { it.isNotBlank() }
-        .forEachIndexed { index, rawLine ->
-          val isCompleted = rawLine.startsWith("[x]", ignoreCase = true) ||
-            rawLine.startsWith("- [x]", ignoreCase = true) ||
-            rawLine.startsWith("* [x]", ignoreCase = true) ||
-            rawLine.startsWith("☑") ||
-            rawLine.startsWith("✓")
+      trimmed.lineSequence().forEachIndexed { idx, line ->
+        var clean = line.trim()
+        if (clean.isBlank() || clean.startsWith("#")) return@forEachIndexed
 
-          val cleaned = rawLine
-            .replace(Regex("""^[-*•☐☑✓]\s*"""), "")
-            .replace(Regex("""^\[[ xX]?\]\s*"""), "")
-            .replace(Regex("""^\d+[.)]\s*"""), "")
-            .trim()
-
-          if (cleaned.isBlank()) return@forEachIndexed
-
-          // Split optional notes after " — " or " - " or " | "
-          val parts = cleaned.split(Regex("""\s+[—|\-]\s+"""), limit = 2)
-          val title = parts[0].trim()
-          val notes = parts.getOrNull(1)?.trim().orEmpty()
-
-          if (title.isNotBlank() && seen.add(title.lowercase())) {
-            results.add(
-              GoogleTaskItemInfo(
-                id = "paste_${index}_${title.lowercase().hashCode()}",
-                title = title,
-                notes = notes,
-                isCompleted = isCompleted,
-              )
-            )
+        var isCompleted = false
+        val cbMatch = checkboxRegex.matchEntire(clean)
+        if (cbMatch != null) {
+          isCompleted = cbMatch.groupValues[1].equals("x", ignoreCase = true)
+          clean = cbMatch.groupValues[2].trim()
+        } else {
+          val bulletMatch = bulletRegex.matchEntire(clean)
+          if (bulletMatch != null) {
+            clean = bulletMatch.groupValues[1].trim()
           }
         }
+
+        if (clean.isBlank()) return@forEachIndexed
+
+        val sepParts = clean.split(Regex("""\s+[—–|-]\s+"""), limit = 2)
+        val title = sepParts[0].trim()
+        val notes = sepParts.getOrNull(1)?.trim().orEmpty()
+
+        if (title.isNotBlank() && seen.add(title.lowercase())) {
+          results.add(
+            GoogleTaskItemInfo(
+              id = "parsed_$idx",
+              title = title,
+              notes = notes,
+              isCompleted = isCompleted,
+            )
+          )
+        }
+      }
       return results
     }
 
-    private fun parseTakeoutJson(jsonText: String): List<GoogleTaskItemInfo> = runCatching {
-      val collected = mutableListOf<GoogleTaskItemInfo>()
-      val seen = mutableSetOf<String>()
+    private fun tryParseTakeoutJson(rawJson: String): List<GoogleTaskItemInfo> {
+      return runCatching {
+        val out = mutableListOf<GoogleTaskItemInfo>()
+        val seen = mutableSetOf<String>()
 
-      fun extractFromArray(arr: JSONArray) {
-        for (i in 0 until arr.length()) {
-          val obj = arr.optJSONObject(i) ?: continue
-          val nestedItems = obj.optJSONArray("items")
-          if (nestedItems != null && obj.optString("kind").contains("tasks#taskLists", ignoreCase = true).not() && !obj.has("title")) {
-            extractFromArray(nestedItems)
-            continue
-          }
-          if (nestedItems != null && nestedItems.length() > 0 && obj.optString("kind") == "tasks#taskList") {
-            extractFromArray(nestedItems)
-            continue
-          }
-          val title = obj.optString("title", "").trim()
-          if (title.isNotBlank() && seen.add(title.lowercase())) {
-            collected.add(
-              GoogleTaskItemInfo(
-                id = obj.optString("id", "json_${i}_${title.hashCode()}"),
-                title = title,
-                notes = obj.optString("notes", "").trim(),
-                isCompleted = obj.optString("status") == "completed",
+        fun extractArray(arr: JSONArray) {
+          for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val nested = obj.optJSONArray("items")
+            if (nested != null) {
+              extractArray(nested)
+              continue
+            }
+            val title = obj.optString("title", "").trim()
+            val deleted = obj.optBoolean("deleted", false)
+            if (!deleted && title.isNotBlank() && seen.add(title.lowercase())) {
+              out.add(
+                GoogleTaskItemInfo(
+                  id = obj.optString("id", "json_${out.size}"),
+                  title = title,
+                  notes = obj.optString("notes", "").trim(),
+                  isCompleted = obj.optString("status", "") == "completed",
+                )
               )
-            )
-          }
-          if (nestedItems != null) {
-            extractFromArray(nestedItems)
+            }
           }
         }
-      }
 
-      if (jsonText.startsWith("[")) {
-        extractFromArray(JSONArray(jsonText))
-      } else {
-        val root = JSONObject(jsonText)
-        val itemsArr = root.optJSONArray("items")
-        if (itemsArr != null) {
-          extractFromArray(itemsArr)
+        if (rawJson.startsWith("{")) {
+          val root = JSONObject(rawJson)
+          root.optJSONArray("items")?.let { extractArray(it) }
+        } else {
+          extractArray(JSONArray(rawJson))
         }
-      }
-      collected
-    }.getOrElse { emptyList() }
+        out
+      }.getOrDefault(emptyList())
+    }
   }
 }

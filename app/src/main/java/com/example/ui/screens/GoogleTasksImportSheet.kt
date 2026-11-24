@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,9 +59,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.GoogleTaskItemInfo
+import com.example.data.model.TasksImportTarget
 import com.example.data.model.UiState
 import com.example.data.remote.GoogleWorkspaceRepository
 import com.example.ui.viewmodel.PackWiseViewModel
@@ -71,7 +75,7 @@ fun GoogleTasksImportSheet(
   viewModel: PackWiseViewModel,
   activeTripId: String?,
   activeTripName: String?,
-  defaultToAlwaysBring: Boolean,
+  defaultTarget: TasksImportTarget,
   initialSharedText: String? = null,
   onDismiss: () -> Unit,
 ) {
@@ -85,11 +89,16 @@ fun GoogleTasksImportSheet(
     mutableIntStateOf(if (!initialSharedText.isNullOrBlank()) 1 else 0)
   }
   var selectedTaskIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-  var importAsAlwaysBring by remember(defaultToAlwaysBring, activeTripId) {
-    mutableStateOf(defaultToAlwaysBring || activeTripId.isNullOrBlank())
+  var importTarget by remember(defaultTarget, activeTripId) {
+    mutableStateOf(
+      if (activeTripId.isNullOrBlank() && defaultTarget == TasksImportTarget.SELECTED_TRIP) {
+        TasksImportTarget.ALWAYS_BRING
+      } else {
+        defaultTarget
+      }
+    )
   }
 
-  // Paste / File Import state
   var pastedText by remember(initialSharedText) {
     mutableStateOf(initialSharedText.orEmpty())
   }
@@ -160,13 +169,13 @@ fun GoogleTasksImportSheet(
         Tab(
           selected = selectedTab == 0,
           onClick = { selectedTab = 0 },
-          text = { Text("Google Account") },
+          text = { Text("Google Account", maxLines = 1, overflow = TextOverflow.Ellipsis) },
           modifier = Modifier.testTag("tab_google_tasks_oauth"),
         )
         Tab(
           selected = selectedTab == 1,
           onClick = { selectedTab = 1 },
-          text = { Text("Paste / File Import") },
+          text = { Text("Paste or File", maxLines = 1, overflow = TextOverflow.Ellipsis) },
           modifier = Modifier.testTag("tab_paste_tasks"),
         )
       }
@@ -186,26 +195,32 @@ fun GoogleTasksImportSheet(
               onClick = {
                 (context as? Activity)?.let { viewModel.connectAndLoadGoogleTasks(it) }
               },
+              contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
               modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
+                .heightIn(min = 50.dp)
                 .testTag("connect_google_tasks_button"),
             ) {
               Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
               Spacer(modifier = Modifier.width(8.dp))
-              Text("Connect Google Tasks")
+              Text("Connect Google Tasks", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Spacer(modifier = Modifier.height(8.dp))
             OutlinedButton(
               onClick = { selectedTab = 1 },
+              contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
               modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp)
+                .heightIn(min = 48.dp)
                 .testTag("idle_paste_import_button"),
             ) {
               Icon(Icons.Rounded.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
               Spacer(modifier = Modifier.width(8.dp))
-              Text("Paste or Import File (No OAuth)")
+              Text(
+                text = "Paste or Import File (No OAuth)",
+                maxLines = 2,
+                textAlign = TextAlign.Center,
+              )
             }
           }
           is UiState.Loading -> {
@@ -247,17 +262,22 @@ fun GoogleTasksImportSheet(
                     onClick = {
                       (context as? Activity)?.let { viewModel.connectAndLoadGoogleTasks(it) }
                     },
-                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                    modifier = Modifier
+                      .weight(1f)
+                      .heightIn(min = 48.dp),
                   ) {
-                    Text("Retry OAuth")
+                    Text("Retry", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                   }
                   Button(
                     onClick = { selectedTab = 1 },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
                     modifier = Modifier
                       .weight(1f)
+                      .heightIn(min = 48.dp)
                       .testTag("switch_to_paste_import_button"),
                   ) {
-                    Text("Paste List Instead")
+                    Text("Paste Instead", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                   }
                 }
               }
@@ -291,11 +311,11 @@ fun GoogleTasksImportSheet(
 
               Spacer(modifier = Modifier.height(12.dp))
 
-              ImportTargetToggle(
+              ImportTargetSelector(
                 activeTripId = activeTripId,
                 activeTripName = activeTripName,
-                importAsAlwaysBring = importAsAlwaysBring,
-                onToggle = { importAsAlwaysBring = it },
+                selectedTarget = importTarget,
+                onSelectTarget = { importTarget = it },
               )
 
               when (val ts = tasksState) {
@@ -312,13 +332,15 @@ fun GoogleTasksImportSheet(
                     onToggleId = { id ->
                       selectedTaskIds = if (id in selectedTaskIds) selectedTaskIds - id else selectedTaskIds + id
                     },
+                    onSelectAll = { selectedTaskIds = ts.data.map { it.id }.toSet() },
+                    onClearSelection = { selectedTaskIds = emptySet() },
                     emptyMessage = "This list has no tasks.",
                     buttonTestTag = "confirm_import_google_tasks_button",
                     onImport = { toImport ->
                       viewModel.importGoogleTasks(
                         tasks = toImport,
                         targetTripId = activeTripId,
-                        importAsAlwaysBring = importAsAlwaysBring,
+                        target = importTarget,
                         onDone = onDismiss,
                       )
                     },
@@ -330,7 +352,6 @@ fun GoogleTasksImportSheet(
           }
         }
       } else {
-        // Tab 1: Paste / File Import (zero OAuth blocks, zero storage permissions)
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -345,27 +366,29 @@ fun GoogleTasksImportSheet(
                 viewModel.showToast("Clipboard is empty. Copy items from Google Tasks first.")
               }
             },
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
             modifier = Modifier
               .weight(1f)
-              .height(48.dp)
+              .heightIn(min = 48.dp)
               .testTag("paste_from_clipboard_button"),
           ) {
             Icon(Icons.Rounded.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Paste Clipboard", maxLines = 1)
+            Text("Clipboard", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
           }
           OutlinedButton(
             onClick = {
               filePickerLauncher.launch(arrayOf("text/plain", "application/json", "text/csv", "*/*"))
             },
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
             modifier = Modifier
               .weight(1f)
-              .height(48.dp)
+              .heightIn(min = 48.dp)
               .testTag("pick_tasks_file_button"),
           ) {
             Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Pick .txt / .json", maxLines = 1)
+            Text("Pick File", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
           }
         }
 
@@ -404,11 +427,11 @@ fun GoogleTasksImportSheet(
           Spacer(modifier = Modifier.height(10.dp))
         }
 
-        ImportTargetToggle(
+        ImportTargetSelector(
           activeTripId = activeTripId,
           activeTripName = activeTripName,
-          importAsAlwaysBring = importAsAlwaysBring,
-          onToggle = { importAsAlwaysBring = it },
+          selectedTarget = importTarget,
+          onSelectTarget = { importTarget = it },
         )
 
         if (parsedTasks.isNotEmpty()) {
@@ -418,13 +441,15 @@ fun GoogleTasksImportSheet(
             onToggleId = { id ->
               selectedParsedIds = if (id in selectedParsedIds) selectedParsedIds - id else selectedParsedIds + id
             },
+            onSelectAll = { selectedParsedIds = parsedTasks.map { it.id }.toSet() },
+            onClearSelection = { selectedParsedIds = emptySet() },
             emptyMessage = "",
             buttonTestTag = "confirm_import_pasted_tasks_button",
             onImport = { toImport ->
               viewModel.importGoogleTasks(
                 tasks = toImport,
                 targetTripId = activeTripId,
-                importAsAlwaysBring = importAsAlwaysBring,
+                target = importTarget,
                 onDone = onDismiss,
               )
             },
@@ -437,42 +462,48 @@ fun GoogleTasksImportSheet(
   }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ImportTargetToggle(
+private fun ImportTargetSelector(
   activeTripId: String?,
   activeTripName: String?,
-  importAsAlwaysBring: Boolean,
-  onToggle: (Boolean) -> Unit,
+  selectedTarget: TasksImportTarget,
+  onSelectTarget: (TasksImportTarget) -> Unit,
 ) {
-  if (activeTripId.isNullOrBlank()) return
-  Row(
+  Column(
     modifier = Modifier
       .fillMaxWidth()
       .clip(MaterialTheme.shapes.medium)
       .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
-      .padding(horizontal = 12.dp, vertical = 8.dp),
-    horizontalArrangement = Arrangement.SpaceBetween,
-    verticalAlignment = Alignment.CenterVertically,
+      .padding(horizontal = 12.dp, vertical = 10.dp),
   ) {
-    Column(modifier = Modifier.weight(1f)) {
-      Text(
-        text = if (importAsAlwaysBring) {
-          "Import into Always Bring Vault"
-        } else {
-          "Import into ${activeTripName ?: "Selected Trip"}"
-        },
-        style = MaterialTheme.typography.labelLarge,
+    Text(
+      text = "Import into:",
+      style = MaterialTheme.typography.labelLarge,
+    )
+    Spacer(modifier = Modifier.height(6.dp))
+    FlowRow(
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+      if (!activeTripId.isNullOrBlank()) {
+        FilterChip(
+          selected = selectedTarget == TasksImportTarget.SELECTED_TRIP,
+          onClick = { onSelectTarget(TasksImportTarget.SELECTED_TRIP) },
+          label = { Text(activeTripName ?: "Selected Trip", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        )
+      }
+      FilterChip(
+        selected = selectedTarget == TasksImportTarget.ALWAYS_BRING,
+        onClick = { onSelectTarget(TasksImportTarget.ALWAYS_BRING) },
+        label = { Text("Always Bring") },
       )
-      Text(
-        text = "Toggle to choose trip-specific vs Always Bring",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      FilterChip(
+        selected = selectedTarget == TasksImportTarget.ALWAYS_DO,
+        onClick = { onSelectTarget(TasksImportTarget.ALWAYS_DO) },
+        label = { Text("Always-Do") },
       )
     }
-    Switch(
-      checked = importAsAlwaysBring,
-      onCheckedChange = onToggle,
-    )
   }
   Spacer(modifier = Modifier.height(10.dp))
 }
@@ -482,6 +513,8 @@ private fun SelectableTasksList(
   tasks: List<GoogleTaskItemInfo>,
   selectedIds: Set<String>,
   onToggleId: (String) -> Unit,
+  onSelectAll: () -> Unit,
+  onClearSelection: () -> Unit,
   emptyMessage: String,
   buttonTestTag: String,
   onImport: (List<GoogleTaskItemInfo>) -> Unit,
@@ -495,6 +528,38 @@ private fun SelectableTasksList(
       )
     }
     return
+  }
+
+  val completedCount = remember(tasks) { tasks.count { it.isCompleted } }
+  val allSelected = selectedIds.size == tasks.size
+
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.SpaceBetween,
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      text = if (completedCount > 0) {
+        "${tasks.size} tasks ($completedCount completed)"
+      } else {
+        "${tasks.size} tasks"
+      },
+      style = MaterialTheme.typography.labelMedium,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    TextButton(
+      onClick = { if (allSelected) onClearSelection() else onSelectAll() },
+      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+      modifier = Modifier
+        .heightIn(min = 48.dp)
+        .testTag("${buttonTestTag}_toggle_all"),
+    ) {
+      Text(
+        text = if (allSelected) "Clear all" else "Select all",
+        maxLines = 1,
+        softWrap = false,
+      )
+    }
   }
 
   LazyColumn(
@@ -517,7 +582,7 @@ private fun SelectableTasksList(
           checked = checked,
           onCheckedChange = { onToggleId(task.id) },
         )
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
           Text(
             text = task.title,
             style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
@@ -530,6 +595,20 @@ private fun SelectableTasksList(
             )
           }
         }
+        if (task.isCompleted) {
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(
+            text = "Completed",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier
+              .clip(MaterialTheme.shapes.small)
+              .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.small)
+              .padding(horizontal = 8.dp, vertical = 3.dp),
+          )
+        }
       }
     }
   }
@@ -540,11 +619,16 @@ private fun SelectableTasksList(
   Button(
     onClick = { onImport(toImport) },
     enabled = toImport.isNotEmpty(),
+    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     modifier = Modifier
       .fillMaxWidth()
-      .height(50.dp)
+      .heightIn(min = 50.dp)
       .testTag(buttonTestTag),
   ) {
-    Text("Import ${toImport.size} Item(s)")
+    Text(
+      text = "Import ${toImport.size} Item(s)",
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
   }
 }

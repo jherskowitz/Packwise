@@ -1,10 +1,6 @@
 package com.example.ui.screens
 
-import android.Manifest
-import android.os.Build
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,25 +15,38 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.CloudSync
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Checklist
+import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.DirectionsTransit
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Event
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Place
+import androidx.compose.material.icons.rounded.Power
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.RestartAlt
-import androidx.compose.material.icons.rounded.Star
-import androidx.compose.material.icons.rounded.StarOutline
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.SimCard
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -45,11 +54,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -58,33 +64,66 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.local.HomeBasePreferences
+import com.example.data.local.HomeCountryPreference
+import com.example.data.local.HomeCountrySource
+import com.example.data.model.AiItemRecommendation
+import com.example.data.model.AttractionSuggestion
+import com.example.data.model.CATEGORY_ALWAYS_DO
+import com.example.data.model.DraftPackingItem
 import com.example.data.model.PackingItem
+import com.example.data.model.TravelGuideInfo
 import com.example.data.model.Trip
+import com.example.data.model.TripItemScope
 import com.example.data.model.UiState
-import com.example.notifications.WeatherNotificationHelper
-import com.example.ui.viewmodel.PackWiseViewModel
+import com.example.ui.components.AiRecommendationsSheet
+import com.example.ui.components.DestinationHeaderImage
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
-private enum class ChecklistFilter(val label: String) {
+private val TRIP_CATEGORY_PRESETS = listOf(
+  "Essentials",
+  "Clothing",
+  "Weather Gear",
+  "Footwear",
+  "Activity Gear",
+  "Tech",
+  "Toiletries",
+  "Documents",
+  "Health",
+  "Outerwear",
+)
+
+enum class ChecklistFilter(val label: String) {
   ALL("All"),
-  UNPACKED("To Pack"),
+  UNPACKED("Remaining"),
+  ALWAYS_DO("Always-Do"),
   ALWAYS_BRING("Always Bring"),
-  TRIP_CONTEXT("Trip Context"),
+  TRIP_CONTEXT("Trip-Specific"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -92,52 +131,55 @@ private enum class ChecklistFilter(val label: String) {
 fun TripDetailScreen(
   trip: Trip,
   itemsState: UiState<List<PackingItem>>,
-  viewModel: PackWiseViewModel,
+  aiEnrichmentState: UiState<String> = UiState.Idle,
+  aiRecommendationsState: UiState<AiItemRecommendation> = UiState.Idle,
+  guideLoadingState: UiState<Unit> = UiState.Idle,
+  homeCountry: HomeCountryPreference = HomeCountryPreference("US", "United States", HomeCountrySource.DEVICE_REGION),
   onNavigateBack: () -> Unit,
+  onTogglePacked: (PackingItem) -> Unit,
+  onAddManualItem: (name: String, category: String, reason: String, quantity: Long, scope: TripItemScope) -> Unit,
+  onDeleteItem: (String) -> Unit,
+  onRecategorizeItem: (item: PackingItem, newScope: TripItemScope, newCategory: String, saveToVault: Boolean) -> Unit,
+  onRefreshWeather: () -> Unit,
+  onToggleNotifications: (Boolean) -> Unit,
   onOpenGoogleTasksImport: () -> Unit,
+  onOpenAiRecommendations: (forceRefresh: Boolean) -> Unit = {},
+  onAddRecommendedItems: (List<DraftPackingItem>) -> Unit = {},
+  onDismissRecommendedItem: (String) -> Unit = {},
+  onClearAiRecommendationsError: () -> Unit = {},
+  onRetryAiEnrichment: () -> Unit = {},
+  onDismissAiEnrichmentError: () -> Unit = {},
+  onGenerateTravelGuide: () -> Unit = {},
+  onDismissGuideError: () -> Unit = {},
+  onAddSuggestedGuideItem: (name: String, category: String, reason: String) -> Unit = { _, _, _ -> },
+  onDismissAttraction: (AttractionSuggestion) -> Unit = {},
+  onCompleteAndResetTrip: (List<PackingItem>, Boolean) -> Unit,
+  onDeleteTrip: () -> Unit,
 ) {
-  BackHandler(onBack = onNavigateBack)
-
-  val context = LocalContext.current
-  var selectedFilter by remember { mutableStateOf(ChecklistFilter.ALL) }
-  var showAddItemDialog by remember { mutableStateOf(false) }
+  var activeFilter by remember { mutableStateOf(ChecklistFilter.ALL) }
+  var showAddDialog by remember { mutableStateOf(false) }
+  var showAiRecommendationsSheet by remember { mutableStateOf(false) }
+  var recategorizingItem by remember { mutableStateOf<PackingItem?>(null) }
   var showResetDialog by remember { mutableStateOf(false) }
-  var showDeleteDialog by remember { mutableStateOf(false) }
-  var showMenu by remember { mutableStateOf(false) }
+  var showDeleteTripDialog by remember { mutableStateOf(false) }
 
-  val notificationLauncher = rememberLauncherForActivityResult(
-    contract = ActivityResultContracts.RequestPermission(),
-  ) { granted ->
-    if (granted) {
-      viewModel.toggleTripWeatherNotifications(trip, true)
-      viewModel.refreshLiveWeatherForTrip(trip) { dest, msg ->
-        WeatherNotificationHelper.postWeatherAlertNotification(
-          context = context,
-          tripId = trip.id,
-          destination = dest,
-          title = "Weather Packing Alert",
-          message = msg,
-        )
-      }
-    }
-  }
+  val dateFmt = remember { DateTimeFormatter.ofPattern("MMM d") }
+  val startLabel = LocalDate.ofEpochDay(trip.startDateEpochDay).format(dateFmt)
+  val endLabel = LocalDate.ofEpochDay(trip.endDateEpochDay).format(dateFmt)
 
   val allItems = (itemsState as? UiState.Success)?.data.orEmpty()
-  val packedCount = allItems.count { it.isPacked }
-  val totalCount = allItems.size
-  val progress = if (totalCount == 0) 0f else packedCount.toFloat() / totalCount.toFloat()
-
-  val filteredItems = remember(allItems, selectedFilter) {
-    when (selectedFilter) {
+  val packedCount = remember(allItems) { allItems.count { it.isPacked } }
+  val alwaysDoCount = remember(allItems) { allItems.count { it.isAlwaysDo } }
+  val alwaysBringCount = remember(allItems) { allItems.count { it.isAlwaysBring && !it.isAlwaysDo } }
+  val tripSpecificCount = remember(allItems) { allItems.count { !it.isAlwaysBring && !it.isAlwaysDo } }
+  val filteredItems = remember(allItems, activeFilter) {
+    when (activeFilter) {
       ChecklistFilter.ALL -> allItems
       ChecklistFilter.UNPACKED -> allItems.filter { !it.isPacked }
-      ChecklistFilter.ALWAYS_BRING -> allItems.filter { it.isAlwaysBring }
-      ChecklistFilter.TRIP_CONTEXT -> allItems.filter { !it.isAlwaysBring }
+      ChecklistFilter.ALWAYS_DO -> allItems.filter { it.isAlwaysDo }
+      ChecklistFilter.ALWAYS_BRING -> allItems.filter { it.isAlwaysBring && !it.isAlwaysDo }
+      ChecklistFilter.TRIP_CONTEXT -> allItems.filter { !it.isAlwaysBring && !it.isAlwaysDo }
     }
-  }
-
-  val groupedItems = remember(filteredItems) {
-    filteredItems.groupBy { it.category }.toSortedMap()
   }
 
   Scaffold(
@@ -147,10 +189,11 @@ fun TripDetailScreen(
           Column {
             Text(
               text = trip.destination,
-              style = MaterialTheme.typography.titleLarge,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
             )
             Text(
-              text = "${trip.durationDays} days · $packedCount/$totalCount packed",
+              text = "$startLabel – $endLabel · ${trip.durationDays} day(s)",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -159,79 +202,39 @@ fun TripDetailScreen(
         navigationIcon = {
           IconButton(
             onClick = onNavigateBack,
-            modifier = Modifier.testTag("trip_detail_back_button"),
+            modifier = Modifier.testTag("detail_back_button"),
           ) {
             Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
           }
         },
         actions = {
           IconButton(
-            onClick = onOpenGoogleTasksImport,
-            modifier = Modifier.testTag("detail_import_tasks_button"),
+            onClick = {
+              showAiRecommendationsSheet = true
+              onOpenAiRecommendations(false)
+            },
+            modifier = Modifier.testTag("detail_top_ai_enrich_button"),
           ) {
-            Icon(Icons.Rounded.Download, contentDescription = "Import from Google Tasks")
+            Icon(Icons.Rounded.AutoAwesome, contentDescription = "AI Packing Recommendations")
           }
           IconButton(
             onClick = { showResetDialog = true },
-            modifier = Modifier.testTag("detail_reset_trip_button"),
+            modifier = Modifier.testTag("detail_top_reset_button"),
           ) {
             Icon(Icons.Rounded.RestartAlt, contentDescription = "Complete & Reset Trip")
           }
-          Box {
-            IconButton(
-              onClick = { showMenu = true },
-              modifier = Modifier.testTag("detail_more_menu_button"),
-            ) {
-              Icon(Icons.Rounded.MoreVert, contentDescription = "More trip options")
-            }
-            DropdownMenu(
-              expanded = showMenu,
-              onDismissRequest = { showMenu = false },
-            ) {
-              DropdownMenuItem(
-                text = { Text("Refresh Weather & Send Alert") },
-                leadingIcon = { Icon(Icons.Rounded.CloudSync, contentDescription = null) },
-                onClick = {
-                  showMenu = false
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                    !WeatherNotificationHelper.hasNotificationPermission(context)
-                  ) {
-                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                  } else {
-                    viewModel.refreshLiveWeatherForTrip(trip) { dest, msg ->
-                      WeatherNotificationHelper.postWeatherAlertNotification(
-                        context = context,
-                        tripId = trip.id,
-                        destination = dest,
-                        title = "Weather Packing Alert",
-                        message = msg,
-                      )
-                    }
-                  }
-                },
-              )
-              DropdownMenuItem(
-                text = { Text("Delete Trip") },
-                leadingIcon = { Icon(Icons.Rounded.DeleteOutline, contentDescription = null) },
-                onClick = {
-                  showMenu = false
-                  showDeleteDialog = true
-                },
-              )
-            }
+          IconButton(
+            onClick = { showDeleteTripDialog = true },
+            modifier = Modifier.testTag("detail_delete_trip_button"),
+          ) {
+            Icon(
+              Icons.Rounded.DeleteOutline,
+              contentDescription = "Delete Trip",
+              tint = MaterialTheme.colorScheme.error,
+            )
           }
         },
       )
-    },
-    floatingActionButton = {
-      FloatingActionButton(
-        onClick = { showAddItemDialog = true },
-        containerColor = MaterialTheme.colorScheme.primary,
-        contentColor = MaterialTheme.colorScheme.onPrimary,
-        modifier = Modifier.testTag("detail_add_item_fab"),
-      ) {
-        Icon(Icons.Rounded.Add, contentDescription = "Add packing item")
-      }
     },
   ) { innerPadding ->
     Box(
@@ -247,167 +250,307 @@ fun TripDetailScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
       ) {
-        // Progress & Weather Status Card
         item {
           Card(
-            shape = MaterialTheme.shapes.large,
+            shape = MaterialTheme.shapes.extraLarge,
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
             modifier = Modifier
               .fillMaxWidth()
-              .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.large),
+              .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.extraLarge),
           ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-              ) {
-                Text(
-                  text = "Packing Progress",
-                  style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                  text = "${(progress * 100).toInt()}%",
-                  style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                  color = MaterialTheme.colorScheme.primary,
-                )
-              }
-              Spacer(modifier = Modifier.height(8.dp))
-              LinearProgressIndicator(
-                progress = { progress },
+            Column {
+              Box(
                 modifier = Modifier
                   .fillMaxWidth()
-                  .height(8.dp)
-                  .clip(RoundedCornerShape(999.dp)),
-                color = MaterialTheme.colorScheme.tertiary,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
-              )
-
-              Spacer(modifier = Modifier.height(12.dp))
-
-              Row(
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .clip(MaterialTheme.shapes.medium)
-                  .background(
-                    if (trip.weatherAlertActive) {
-                      MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
-                    } else {
-                      MaterialTheme.colorScheme.surfaceContainer
-                    }
-                  )
-                  .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                  .height(145.dp),
               ) {
-                Icon(
-                  imageVector = if (trip.weatherAlertActive) {
-                    Icons.Rounded.WarningAmber
-                  } else {
-                    Icons.Rounded.NotificationsActive
-                  },
-                  contentDescription = null,
-                  tint = if (trip.weatherAlertActive) {
-                    MaterialTheme.colorScheme.secondary
-                  } else {
-                    MaterialTheme.colorScheme.primary
-                  },
+                DestinationHeaderImage(
+                  headerImageUrl = trip.headerImageUrl,
+                  destination = trip.destination,
+                  modifier = Modifier.fillMaxSize(),
                 )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Box(
+                  modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                      Brush.verticalGradient(
+                        colors = listOf(Color(0x28062529), Color(0xD9062529)),
+                      )
+                    ),
+                )
+                Column(
+                  modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(14.dp),
+                ) {
                   Text(
-                    text = trip.weatherSummary.ifBlank { "Weather forecast" },
-                    style = MaterialTheme.typography.labelLarge,
+                    text = if (trip.country.isNotBlank()) "${trip.destination}, ${trip.country}" else trip.destination,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                   )
-                  if (trip.weatherAlertActive && trip.weatherAlertMessage.isNotBlank()) {
+                  Text(
+                    text = "$packedCount of ${allItems.size} items packed",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color(0xFFCDE9EC),
+                  )
+                }
+              }
+
+              Column(modifier = Modifier.padding(14.dp)) {
+                val progress = if (allItems.isEmpty()) 0f else packedCount.toFloat() / allItems.size.toFloat()
+                LinearProgressIndicator(
+                  progress = { progress },
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(MaterialTheme.shapes.small),
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically,
+                ) {
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f),
+                  ) {
+                    Icon(
+                      imageVector = if (trip.weatherAlertActive) Icons.Rounded.WarningAmber else Icons.Rounded.WbSunny,
+                      contentDescription = null,
+                      tint = if (trip.weatherAlertActive) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                      modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                      text = trip.weatherSummary.ifBlank { "Tap Refresh for live weather" },
+                      style = MaterialTheme.typography.bodySmall,
+                    )
+                  }
+                  TextButton(
+                    onClick = onRefreshWeather,
+                    modifier = Modifier
+                      .heightIn(min = 48.dp)
+                      .testTag("detail_refresh_weather_button"),
+                  ) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Refresh", maxLines = 1, softWrap = false)
+                  }
+                }
+
+                if (trip.weatherAlertActive && trip.weatherAlertMessage.isNotBlank()) {
+                  Spacer(modifier = Modifier.height(6.dp))
+                  Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                  ) {
                     Text(
                       text = trip.weatherAlertMessage,
                       style = MaterialTheme.typography.bodySmall,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      color = MaterialTheme.colorScheme.onTertiaryContainer,
+                      modifier = Modifier.padding(10.dp),
                     )
                   }
                 }
-                TextButton(
-                  onClick = {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                      !WeatherNotificationHelper.hasNotificationPermission(context)
-                    ) {
-                      notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
-                      viewModel.refreshLiveWeatherForTrip(trip) { dest, msg ->
-                        WeatherNotificationHelper.postWeatherAlertNotification(
-                          context = context,
-                          tripId = trip.id,
-                          destination = dest,
-                          title = "Weather Packing Alert",
-                          message = msg,
-                        )
-                      }
-                    }
-                  },
-                  modifier = Modifier.testTag("refresh_weather_alert_button"),
-                ) {
-                  Text("Check")
-                }
-              }
 
-              Spacer(modifier = Modifier.height(10.dp))
-
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-              ) {
-                OutlinedButton(
-                  onClick = { showResetDialog = true },
-                  modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp)
-                    .testTag("complete_reset_trip_cta"),
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically,
                 ) {
-                  Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-                  Spacer(modifier = Modifier.width(6.dp))
-                  Text("Finish & Reset", maxLines = 1)
-                }
-                OutlinedButton(
-                  onClick = onOpenGoogleTasksImport,
-                  modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp)
-                    .testTag("import_google_tasks_cta"),
-                ) {
-                  Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                  Spacer(modifier = Modifier.width(6.dp))
-                  Text("Google Tasks", maxLines = 1)
+                  Text(
+                    text = "Weather packing alert notifications",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  )
+                  Switch(
+                    checked = trip.weatherNotificationsEnabled,
+                    onCheckedChange = onToggleNotifications,
+                    modifier = Modifier.testTag("detail_notifications_switch"),
+                  )
                 }
               }
             }
           }
         }
 
-        // Filter Chips
+        if (aiEnrichmentState is UiState.Loading) {
+          item {
+            Card(
+              shape = MaterialTheme.shapes.large,
+              colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Row(
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+              ) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                  text = "Enriching checklist with Gemini AI...",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+              }
+            }
+          }
+        } else if (aiEnrichmentState is UiState.Error) {
+          item {
+            Card(
+              shape = MaterialTheme.shapes.large,
+              colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+              modifier = Modifier
+                .fillMaxWidth()
+                .testTag("detail_ai_error_banner"),
+            ) {
+              Column(
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .padding(14.dp),
+              ) {
+                Text(
+                  text = "AI enrichment unavailable — your Always Bring, weather, and manual items are loaded below.",
+                  style = MaterialTheme.typography.labelLarge,
+                  color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                  text = aiEnrichmentState.message,
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.End,
+                ) {
+                  TextButton(
+                    onClick = onDismissAiEnrichmentError,
+                    modifier = Modifier.testTag("detail_ai_error_dismiss_button"),
+                  ) {
+                    Text("Dismiss", maxLines = 1, softWrap = false)
+                  }
+                  Spacer(modifier = Modifier.width(8.dp))
+                  Button(
+                    onClick = onRetryAiEnrichment,
+                    modifier = Modifier
+                      .heightIn(min = 48.dp)
+                      .testTag("detail_ai_error_retry_button"),
+                  ) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Retry AI", maxLines = 1, softWrap = false)
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        item {
+          val existingItemNames = remember(allItems) {
+            allItems.map { it.name.trim().lowercase(Locale.ROOT) }.toSet()
+          }
+          val isKnownDomestic = remember(homeCountry, trip.country) {
+            HomeBasePreferences.isTripInternational(homeCountry, trip.country) == false
+          }
+          DestinationGuideCard(
+            destination = trip.destination,
+            homeCountryName = homeCountry.countryName,
+            isKnownDomestic = isKnownDomestic,
+            guide = trip.travelGuide,
+            loadingState = guideLoadingState,
+            existingItemNames = existingItemNames,
+            onGenerateOrRefresh = onGenerateTravelGuide,
+            onDismissError = onDismissGuideError,
+            onAddSuggestedItem = onAddSuggestedGuideItem,
+            onDismissAttraction = onDismissAttraction,
+          )
+        }
+
+        item {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Button(
+              onClick = { showAddDialog = true },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+              modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .testTag("detail_add_item_button"),
+            ) {
+              Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(modifier = Modifier.width(4.dp))
+              Text("Add Item", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+            OutlinedButton(
+              onClick = onOpenGoogleTasksImport,
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+              modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .testTag("detail_import_tasks_button"),
+            ) {
+              Icon(Icons.Rounded.Checklist, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(modifier = Modifier.width(4.dp))
+              Text("Import Tasks", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+            OutlinedButton(
+              onClick = { showResetDialog = true },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+              modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .testTag("detail_reset_trip_button"),
+            ) {
+              Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(modifier = Modifier.width(4.dp))
+              Text("Reset Fresh", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+          }
+        }
+
         item {
           FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
           ) {
             ChecklistFilter.entries.forEach { filter ->
+              val chipText = when (filter) {
+                ChecklistFilter.ALWAYS_DO -> if (alwaysDoCount > 0) "${filter.label} ($alwaysDoCount)" else filter.label
+                ChecklistFilter.ALWAYS_BRING -> if (alwaysBringCount > 0) "${filter.label} ($alwaysBringCount)" else filter.label
+                ChecklistFilter.TRIP_CONTEXT -> if (tripSpecificCount > 0) "${filter.label} ($tripSpecificCount)" else filter.label
+                else -> filter.label
+              }
               FilterChip(
-                selected = selectedFilter == filter,
-                onClick = { selectedFilter = filter },
-                label = { Text(filter.label) },
-                modifier = Modifier.testTag("filter_chip_${filter.name.lowercase()}"),
+                selected = activeFilter == filter,
+                onClick = { activeFilter = filter },
+                label = { Text(chipText) },
+                modifier = Modifier.testTag("filter_${filter.name.lowercase()}"),
               )
             }
           }
         }
 
-        // Checklist Items
         when (itemsState) {
-          is UiState.Loading -> {
+          is UiState.Loading, is UiState.Idle -> {
             item {
               Box(
                 modifier = Modifier
                   .fillMaxWidth()
-                  .padding(vertical = 32.dp),
+                  .padding(24.dp),
                 contentAlignment = Alignment.Center,
               ) {
                 CircularProgressIndicator()
@@ -419,63 +562,276 @@ fun TripDetailScreen(
               Text(
                 text = itemsState.message,
                 color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(12.dp),
               )
             }
           }
           is UiState.Success -> {
-            if (groupedItems.isEmpty()) {
+            if (filteredItems.isEmpty()) {
               item {
                 Card(
-                  colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                  shape = MaterialTheme.shapes.medium,
+                  colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                   modifier = Modifier.fillMaxWidth(),
                 ) {
                   Text(
-                    text = if (selectedFilter == ChecklistFilter.UNPACKED && totalCount > 0) {
-                      "Everything is packed! Ready to travel — tap \"Finish & Reset\" after your trip to keep your list fresh."
+                    text = if (allItems.isEmpty()) {
+                      "No items in this checklist yet. Tap Add Item or Import Tasks."
                     } else {
-                      "No items match this filter yet."
+                      "No items match the \"${activeFilter.label}\" filter."
                     },
                     style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
                   )
                 }
               }
             } else {
-              groupedItems.forEach { (category, items) ->
-                item(key = "header_$category") {
-                  Text(
-                    text = "$category (${items.count { it.isPacked }}/${items.size})",
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
-                  )
-                }
-                items(items, key = { it.id }) { item ->
-                  PackingItemRow(
-                    item = item,
-                    onTogglePacked = { viewModel.toggleItemPacked(trip.id, item) },
-                    onPromoteAlwaysBring = { viewModel.promoteToAlwaysBring(trip.id, item) },
-                    onDelete = { viewModel.deleteTripItem(trip.id, item.id) },
-                  )
-                }
+              items(filteredItems, key = { it.id }) { item ->
+                PackingItemRowCard(
+                  item = item,
+                  onTogglePacked = { onTogglePacked(item) },
+                  onRecategorize = { recategorizingItem = item },
+                  onDelete = { onDeleteItem(item.id) },
+                )
               }
             }
           }
-          is UiState.Idle -> Unit
         }
 
-        item { Spacer(modifier = Modifier.height(80.dp)) }
+        item { Spacer(modifier = Modifier.height(60.dp)) }
       }
     }
   }
 
-  if (showAddItemDialog) {
-    AddPackingItemDialog(
-      onDismiss = { showAddItemDialog = false },
-      onAdd = { name, category, qty, saveAlwaysBring ->
-        viewModel.addManualItemToTrip(trip.id, name, category, qty, saveAlwaysBring)
-        showAddItemDialog = false
+  if (showAddDialog) {
+    var name by remember { mutableStateOf("") }
+    var selectedScope by remember {
+      mutableStateOf(
+        if (activeFilter == ChecklistFilter.ALWAYS_DO) TripItemScope.ALWAYS_DO else TripItemScope.TRIP_SPECIFIC
+      )
+    }
+    var category by remember { mutableStateOf("Essentials") }
+    var qtyText by remember { mutableStateOf("1") }
+    var reason by remember { mutableStateOf("") }
+
+    AlertDialog(
+      onDismissRequest = { showAddDialog = false },
+      title = { Text("Add Item or Task") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = {
+              Text(
+                if (selectedScope == TripItemScope.ALWAYS_DO) {
+                  "Task name (e.g. Empty the trash)"
+                } else {
+                  "Item name"
+                }
+              )
+            },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("detail_add_name_input"),
+          )
+          Text(
+            text = "Type",
+            style = MaterialTheme.typography.labelLarge,
+          )
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            FilterChip(
+              selected = selectedScope == TripItemScope.TRIP_SPECIFIC,
+              onClick = { selectedScope = TripItemScope.TRIP_SPECIFIC },
+              label = { Text("This Trip") },
+            )
+            FilterChip(
+              selected = selectedScope == TripItemScope.ALWAYS_BRING,
+              onClick = { selectedScope = TripItemScope.ALWAYS_BRING },
+              label = { Text("Always Bring") },
+            )
+            FilterChip(
+              selected = selectedScope == TripItemScope.ALWAYS_DO,
+              onClick = { selectedScope = TripItemScope.ALWAYS_DO },
+              label = { Text("Always-Do") },
+            )
+          }
+          if (selectedScope != TripItemScope.ALWAYS_DO) {
+            OutlinedTextField(
+              value = category,
+              onValueChange = { category = it },
+              label = { Text("Category") },
+              singleLine = true,
+              modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+              value = qtyText,
+              onValueChange = { qtyText = it.filter { ch -> ch.isDigit() } },
+              label = { Text("Quantity") },
+              singleLine = true,
+              modifier = Modifier.fillMaxWidth(),
+            )
+          } else {
+            Text(
+              text = "Saved under Always-Do (home tasks before leaving) and added to future trips automatically.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+          OutlinedTextField(
+            value = reason,
+            onValueChange = { reason = it },
+            label = { Text("Notes / Reason") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+          )
+        }
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            onAddManualItem(
+              name,
+              if (selectedScope == TripItemScope.ALWAYS_DO) CATEGORY_ALWAYS_DO else category.ifBlank { "Essentials" },
+              reason,
+              if (selectedScope == TripItemScope.ALWAYS_DO) 1L else qtyText.toLongOrNull()?.coerceIn(1L, 99L) ?: 1L,
+              selectedScope,
+            )
+            showAddDialog = false
+          },
+          enabled = name.isNotBlank(),
+          modifier = Modifier.testTag("detail_confirm_add_button"),
+        ) {
+          Text("Add")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showAddDialog = false }) {
+          Text("Cancel")
+        }
+      },
+    )
+  }
+
+  recategorizingItem?.let { item ->
+    var selectedScope by remember(item.id) { mutableStateOf(item.scope) }
+    var category by remember(item.id) {
+      mutableStateOf(
+        if (item.category.equals(CATEGORY_ALWAYS_DO, ignoreCase = true)) {
+          "Essentials"
+        } else {
+          item.category.ifBlank { "Essentials" }
+        }
+      )
+    }
+    var saveToVault by remember(item.id) { mutableStateOf(true) }
+
+    AlertDialog(
+      onDismissRequest = { recategorizingItem = null },
+      title = { Text("Recategorize \"${item.name}\"") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Text(
+            text = "List Group",
+            style = MaterialTheme.typography.labelLarge,
+          )
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            FilterChip(
+              selected = selectedScope == TripItemScope.TRIP_SPECIFIC,
+              onClick = { selectedScope = TripItemScope.TRIP_SPECIFIC },
+              label = { Text("Trip-Specific") },
+            )
+            FilterChip(
+              selected = selectedScope == TripItemScope.ALWAYS_BRING,
+              onClick = { selectedScope = TripItemScope.ALWAYS_BRING },
+              label = { Text("Always Bring") },
+            )
+            FilterChip(
+              selected = selectedScope == TripItemScope.ALWAYS_DO,
+              onClick = { selectedScope = TripItemScope.ALWAYS_DO },
+              label = { Text("Always-Do") },
+            )
+          }
+
+          if (selectedScope == TripItemScope.ALWAYS_DO) {
+            Text(
+              text = "Moved to the Always-Do category for pre-departure home tasks (before you leave).",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          } else {
+            Text(
+              text = "Packing Category",
+              style = MaterialTheme.typography.labelLarge,
+            )
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+              TRIP_CATEGORY_PRESETS.forEach { preset ->
+                FilterChip(
+                  selected = category.equals(preset, ignoreCase = true),
+                  onClick = { category = preset },
+                  label = { Text(preset) },
+                )
+              }
+            }
+            OutlinedTextField(
+              value = category,
+              onValueChange = { category = it },
+              label = { Text("Custom category") },
+              singleLine = true,
+              modifier = Modifier.fillMaxWidth(),
+            )
+          }
+
+          if (selectedScope == TripItemScope.ALWAYS_BRING || selectedScope == TripItemScope.ALWAYS_DO) {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text(
+                text = "Save to Always vault for future trips",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+              )
+              Switch(
+                checked = saveToVault,
+                onCheckedChange = { saveToVault = it },
+              )
+            }
+          }
+        }
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            onRecategorizeItem(
+              item,
+              selectedScope,
+              if (selectedScope == TripItemScope.ALWAYS_DO) CATEGORY_ALWAYS_DO else category.ifBlank { "Essentials" },
+              saveToVault && selectedScope != TripItemScope.TRIP_SPECIFIC,
+            )
+            recategorizingItem = null
+          },
+          modifier = Modifier.testTag("confirm_recategorize_item_button"),
+        ) {
+          Text("Save")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { recategorizingItem = null }) {
+          Text("Cancel")
+        }
       },
     )
   }
@@ -483,85 +839,101 @@ fun TripDetailScreen(
   if (showResetDialog) {
     AlertDialog(
       onDismissRequest = { showResetDialog = false },
-      title = { Text("Reset After Trip?") },
+      title = { Text("Complete & Reset Checklist") },
       text = {
         Text(
-          "Resetting unchecks every item on this checklist (including Always Bring essentials) so your list is completely fresh for your next journey."
+          "Resetting unchecks all items so your ${trip.destination} checklist is ready for your next journey while keeping your Always Bring and Always-Do items intact."
         )
       },
       confirmButton = {
         Button(
           onClick = {
-            viewModel.completeAndResetTrip(trip, allItems, reopenImmediately = false)
+            onCompleteAndResetTrip(allItems, true)
             showResetDialog = false
           },
-          modifier = Modifier.testTag("confirm_complete_reset_button"),
+          modifier = Modifier.testTag("confirm_complete_and_reset_button"),
         ) {
-          Text("Archive & Reset")
+          Text("Complete & Reset")
         }
       },
       dismissButton = {
-        Row {
-          TextButton(
-            onClick = {
-              viewModel.completeAndResetTrip(trip, allItems, reopenImmediately = true)
-              showResetDialog = false
-            },
-            modifier = Modifier.testTag("confirm_reuse_fresh_button"),
-          ) {
-            Text("Uncheck & Keep Active")
-          }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
           TextButton(onClick = { showResetDialog = false }) {
             Text("Cancel")
+          }
+          OutlinedButton(
+            onClick = {
+              onCompleteAndResetTrip(allItems, false)
+              showResetDialog = false
+            },
+          ) {
+            Text("Reset Only")
           }
         }
       },
     )
   }
 
-  if (showDeleteDialog) {
+  if (showDeleteTripDialog) {
     AlertDialog(
-      onDismissRequest = { showDeleteDialog = false },
-      title = { Text("Delete Trip?") },
-      text = { Text("This removes ${trip.destination} and its trip-specific checklist items. Your Always Bring vault remains safe.") },
+      onDismissRequest = { showDeleteTripDialog = false },
+      title = { Text("Delete ${trip.destination}?") },
+      text = {
+        Text("This permanently deletes this trip and all checklist items for it. Your Always Bring vault remains unchanged.")
+      },
       confirmButton = {
         Button(
-          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
           onClick = {
-            showDeleteDialog = false
-            viewModel.deleteTrip(trip.id, onNavigateBack)
+            showDeleteTripDialog = false
+            onDeleteTrip()
           },
+          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+          modifier = Modifier.testTag("confirm_delete_trip_button"),
         ) {
           Text("Delete")
         }
       },
       dismissButton = {
-        TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") }
+        TextButton(onClick = { showDeleteTripDialog = false }) {
+          Text("Cancel")
+        }
       },
+    )
+  }
+
+  if (showAiRecommendationsSheet) {
+    AiRecommendationsSheet(
+      destination = trip.destination,
+      recommendationsState = aiRecommendationsState,
+      onRefresh = { onOpenAiRecommendations(true) },
+      onAddItems = onAddRecommendedItems,
+      onDismissItem = onDismissRecommendedItem,
+      onClearError = onClearAiRecommendationsError,
+      onDismissSheet = { showAiRecommendationsSheet = false },
     )
   }
 }
 
 @Composable
-private fun PackingItemRow(
+private fun PackingItemRowCard(
   item: PackingItem,
   onTogglePacked: () -> Unit,
-  onPromoteAlwaysBring: () -> Unit,
+  onRecategorize: () -> Unit,
   onDelete: () -> Unit,
 ) {
   Card(
     shape = MaterialTheme.shapes.medium,
     colors = CardDefaults.cardColors(
       containerColor = if (item.isPacked) {
-        MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.65f)
+        MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.65f)
       } else {
         MaterialTheme.colorScheme.surfaceContainerLow
-      }
+      },
     ),
     modifier = Modifier
       .fillMaxWidth()
-      .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
       .clip(MaterialTheme.shapes.medium)
+      .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
       .clickable(onClick = onTogglePacked)
       .testTag("packing_item_${item.id}"),
   ) {
@@ -574,161 +946,688 @@ private fun PackingItemRow(
       Checkbox(
         checked = item.isPacked,
         onCheckedChange = { onTogglePacked() },
-        modifier = Modifier.testTag("packing_checkbox_${item.id}"),
+        modifier = Modifier.testTag("checkbox_item_${item.id}"),
       )
       Column(modifier = Modifier.weight(1f)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
           Text(
-            text = if (item.quantity > 1L) "${item.name} ×${item.quantity}" else item.name,
-            style = MaterialTheme.typography.bodyLarge.copy(
+            text = if (!item.isAlwaysDo && item.quantity > 1L) "${item.name} ×${item.quantity}" else item.name,
+            style = MaterialTheme.typography.titleSmall.copy(
+              fontWeight = FontWeight.SemiBold,
               textDecoration = if (item.isPacked) TextDecoration.LineThrough else TextDecoration.None,
-              fontWeight = FontWeight.Medium,
             ),
-            color = if (item.isPacked) {
-              MaterialTheme.colorScheme.onSurfaceVariant
-            } else {
-              MaterialTheme.colorScheme.onSurface
-            },
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+          )
+          if (item.isAlwaysDo) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Surface(
+              shape = MaterialTheme.shapes.small,
+              color = MaterialTheme.colorScheme.tertiaryContainer,
+            ) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+              ) {
+                Icon(
+                  Icons.Rounded.Home,
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                  modifier = Modifier.size(11.dp),
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                  text = "Always-Do",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+              }
+            }
+          } else if (item.isAlwaysBring) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Surface(
+              shape = MaterialTheme.shapes.small,
+              color = MaterialTheme.colorScheme.secondaryContainer,
+            ) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+              ) {
+                Icon(
+                  Icons.Rounded.Shield,
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                  modifier = Modifier.size(11.dp),
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                  text = "Always",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+              }
+            }
+          }
+        }
+        val subtitle = listOf(item.category, item.contextReason)
+          .filter { it.isNotBlank() }
+          .joinToString(" · ")
+        if (subtitle.isNotBlank()) {
+          Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
           )
         }
-        Spacer(modifier = Modifier.height(4.dp))
-        Row(
-          horizontalArrangement = Arrangement.spacedBy(6.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = if (item.isAlwaysBring) {
-              MaterialTheme.colorScheme.primaryContainer
-            } else {
-              MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)
-            },
-          ) {
-            Text(
-              text = if (item.isAlwaysBring) "ALWAYS BRING" else item.sourceType.uppercase().replace("_", " "),
-              style = MaterialTheme.typography.labelSmall,
-              color = if (item.isAlwaysBring) {
-                MaterialTheme.colorScheme.onPrimaryContainer
-              } else {
-                MaterialTheme.colorScheme.onSecondaryContainer
-              },
-              modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-            )
-          }
-          if (item.contextReason.isNotBlank() && !item.isAlwaysBring) {
-            Text(
-              text = item.contextReason,
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-              maxLines = 1,
-            )
-          }
-        }
       }
-      if (!item.isAlwaysBring) {
-        IconButton(
-          onClick = onPromoteAlwaysBring,
-          modifier = Modifier.size(44.dp),
-        ) {
-          Icon(
-            imageVector = Icons.Rounded.StarOutline,
-            contentDescription = "Save to Always Bring",
-            tint = MaterialTheme.colorScheme.primary,
-          )
-        }
-      } else {
-        Icon(
-          imageVector = Icons.Rounded.Star,
-          contentDescription = "Always Bring item",
-          tint = MaterialTheme.colorScheme.primary,
-          modifier = Modifier
-            .padding(horizontal = 10.dp)
-            .size(20.dp),
-        )
-      }
+
       IconButton(
-        onClick = onDelete,
-        modifier = Modifier.size(44.dp),
+        onClick = onRecategorize,
+        modifier = Modifier.testTag("recategorize_item_${item.id}"),
       ) {
         Icon(
-          imageVector = Icons.Rounded.DeleteOutline,
-          contentDescription = "Remove item",
-          tint = MaterialTheme.colorScheme.onSurfaceVariant,
+          Icons.Rounded.Edit,
+          contentDescription = "Recategorize ${item.name}",
+          tint = MaterialTheme.colorScheme.primary,
+        )
+      }
+
+      IconButton(
+        onClick = onDelete,
+        modifier = Modifier.testTag("delete_item_${item.id}"),
+      ) {
+        Icon(
+          Icons.Rounded.DeleteOutline,
+          contentDescription = "Delete ${item.name}",
+          tint = MaterialTheme.colorScheme.error,
         )
       }
     }
   }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddPackingItemDialog(
-  onDismiss: () -> Unit,
-  onAdd: (String, String, Long, Boolean) -> Unit,
+private fun DestinationGuideCard(
+  destination: String,
+  homeCountryName: String,
+  isKnownDomestic: Boolean,
+  guide: TravelGuideInfo?,
+  loadingState: UiState<Unit>,
+  existingItemNames: Set<String>,
+  onGenerateOrRefresh: () -> Unit,
+  onDismissError: () -> Unit,
+  onAddSuggestedItem: (name: String, category: String, reason: String) -> Unit,
+  onDismissAttraction: (AttractionSuggestion) -> Unit,
 ) {
-  var name by remember { mutableStateOf("") }
-  var category by remember { mutableStateOf("Essentials") }
-  var quantityText by remember { mutableStateOf("1") }
-  var saveAlwaysBring by remember { mutableStateOf(false) }
+  var expanded by remember(destination) { mutableStateOf(true) }
+  val showInternationalPrep = guide?.isInternationalTravel == true && !isKnownDomestic
 
-  AlertDialog(
-    onDismissRequest = onDismiss,
-    title = { Text("Add Packing Item") },
-    text = {
-      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedTextField(
-          value = name,
-          onValueChange = { name = it },
-          label = { Text("Item name") },
-          singleLine = true,
-          modifier = Modifier
-            .fillMaxWidth()
-            .testTag("add_item_name_input"),
-        )
-        OutlinedTextField(
-          value = category,
-          onValueChange = { category = it },
-          label = { Text("Category") },
-          singleLine = true,
-          modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-          value = quantityText,
-          onValueChange = { quantityText = it.filter { ch -> ch.isDigit() } },
-          label = { Text("Quantity") },
-          singleLine = true,
-          modifier = Modifier.fillMaxWidth(),
-        )
+  Card(
+    shape = MaterialTheme.shapes.extraLarge,
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    modifier = Modifier
+      .fillMaxWidth()
+      .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.extraLarge)
+      .testTag("destination_guide_card"),
+  ) {
+    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
         Row(
           verticalAlignment = Alignment.CenterVertically,
+          modifier = Modifier.weight(1f),
+        ) {
+          Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.size(36.dp),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(
+                imageVector = Icons.Rounded.Explore,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(20.dp),
+              )
+            }
+          }
+          Spacer(modifier = Modifier.width(10.dp))
+          Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Text(
+                text = "Destination Guide",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+              )
+              if (showInternationalPrep) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                  shape = MaterialTheme.shapes.small,
+                  color = MaterialTheme.colorScheme.tertiaryContainer,
+                ) {
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                  ) {
+                    Icon(
+                      Icons.Rounded.Public,
+                      contentDescription = null,
+                      tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                      modifier = Modifier.size(11.dp),
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                      text = "Int'l Prep",
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                  }
+                }
+              } else if (isKnownDomestic) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                  shape = MaterialTheme.shapes.small,
+                  color = MaterialTheme.colorScheme.secondaryContainer,
+                ) {
+                  Text(
+                    text = "Domestic",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                  )
+                }
+              }
+            }
+            Text(
+              text = if (isKnownDomestic) {
+                "Attractions & local events · $homeCountryName"
+              } else {
+                "Attractions, events, adapter & eSIM"
+              },
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+
+        if (guide != null) {
+          IconButton(
+            onClick = onGenerateOrRefresh,
+            enabled = loadingState !is UiState.Loading,
+            modifier = Modifier.testTag("guide_refresh_button"),
+          ) {
+            Icon(Icons.Rounded.Refresh, contentDescription = "Refresh Destination Guide")
+          }
+          IconButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.testTag("guide_expand_toggle_button"),
+          ) {
+            Icon(
+              imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+              contentDescription = if (expanded) "Collapse guide" else "Expand guide",
+            )
+          }
+        }
+      }
+
+      if (loadingState is UiState.Loading) {
+        Row(
           modifier = Modifier
             .fillMaxWidth()
-            .clickable { saveAlwaysBring = !saveAlwaysBring },
+            .padding(vertical = 4.dp),
+          verticalAlignment = Alignment.CenterVertically,
         ) {
-          Checkbox(
-            checked = saveAlwaysBring,
-            onCheckedChange = { saveAlwaysBring = it },
+          CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+          Spacer(modifier = Modifier.width(10.dp))
+          Text(
+            text = if (isKnownDomestic) {
+              "Loading nearby attractions & local events..."
+            } else {
+              "Loading attractions, events, power adapter & eSIM tips..."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+      } else if (loadingState is UiState.Error) {
+        Surface(
+          shape = MaterialTheme.shapes.medium,
+          color = MaterialTheme.colorScheme.errorContainer,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+              text = loadingState.message,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.End,
+            ) {
+              TextButton(onClick = onDismissError) { Text("Dismiss") }
+              Spacer(modifier = Modifier.width(6.dp))
+              Button(
+                onClick = onGenerateOrRefresh,
+                modifier = Modifier.heightIn(min = 48.dp),
+              ) {
+                Text("Retry")
+              }
+            }
+          }
+        }
+      }
+
+      if (guide == null && loadingState !is UiState.Loading) {
+        Button(
+          onClick = onGenerateOrRefresh,
+          modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .testTag("detail_generate_guide_button"),
+        ) {
+          Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(
+            text = if (isKnownDomestic) "Get Attractions & Events" else "Get Attractions, Events & Int'l Prep",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      } else if (guide != null && expanded) {
+        // 1. Power Adapter & eSIM Essentials (International trips only)
+        if (showInternationalPrep && (guide.powerAdapterSummary.isNotBlank() || guide.esimSummary.isNotBlank())) {
+          Text(
+            text = "Power Adapter & Connectivity",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+          )
+        }
+
+        if (showInternationalPrep && guide.powerAdapterSummary.isNotBlank()) {
+          val adapterItemName = guide.powerAdapterChecklistItem.ifBlank { "Travel Power Adapter" }
+          val alreadyAdded = adapterItemName.trim().lowercase(Locale.ROOT) in existingItemNames
+          GuidePrepRow(
+            icon = Icons.Rounded.Power,
+            title = "Power Adapter",
+            body = guide.powerAdapterSummary,
+            actionLabel = if (alreadyAdded) "Added" else "Add Adapter",
+            alreadyAdded = alreadyAdded,
+            buttonTag = "guide_add_adapter_button",
+            onAction = {
+              onAddSuggestedItem(
+                adapterItemName,
+                "Tech",
+                "Power & plug compatibility for $destination",
+              )
+            },
+          )
+        }
+
+        if (showInternationalPrep && guide.esimSummary.isNotBlank()) {
+          val esimItemName = guide.esimChecklistItem.ifBlank { "$destination Data eSIM" }
+          val alreadyAdded = esimItemName.trim().lowercase(Locale.ROOT) in existingItemNames
+          GuidePrepRow(
+            icon = Icons.Rounded.SimCard,
+            title = "eSIM & Mobile Data",
+            body = guide.esimSummary,
+            actionLabel = if (alreadyAdded) "Added" else "Add eSIM",
+            alreadyAdded = alreadyAdded,
+            buttonTag = "guide_add_esim_button",
+            onAction = {
+              onAddSuggestedItem(
+                esimItemName,
+                "Tech",
+                "Connectivity plan for $destination",
+              )
+            },
+          )
+        }
+
+        // 2. Currency, Transit & Entry Tips
+        val tips = buildList {
+          if (showInternationalPrep && guide.currencyAndPaymentTip.isNotBlank()) {
+            add(Triple(Icons.Rounded.CurrencyExchange, "Currency & Payments", guide.currencyAndPaymentTip))
+          }
+          if (guide.transitTip.isNotBlank()) {
+            add(Triple(Icons.Rounded.DirectionsTransit, "Local Transit", guide.transitTip))
+          }
+          if (guide.entryAndSafetyTip.isNotBlank() && (showInternationalPrep || !isKnownDomestic)) {
+            add(Triple(Icons.Rounded.VerifiedUser, "Entry & Safety", guide.entryAndSafetyTip))
+          }
+        }
+        if (tips.isNotEmpty()) {
+          Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Column(
+              modifier = Modifier.padding(10.dp),
+              verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              tips.forEach { (icon, label, detail) ->
+                Row(verticalAlignment = Alignment.Top) {
+                  Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                      .padding(top = 2.dp)
+                      .size(16.dp),
+                  )
+                  Spacer(modifier = Modifier.width(8.dp))
+                  Column {
+                    Text(
+                      text = label,
+                      style = MaterialTheme.typography.labelMedium,
+                      fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                      text = detail,
+                      style = MaterialTheme.typography.bodySmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // 3. Nearby Attractions (Swipeable to dismiss)
+        if (guide.nearbyAttractions.isNotEmpty()) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(
+              text = "Nearby Attractions",
+              style = MaterialTheme.typography.labelLarge,
+              color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+              text = "Swipe to dismiss",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+          guide.nearbyAttractions.forEachIndexed { index, attraction ->
+            key("${attraction.name}_${attraction.area}") {
+              val dismissState = rememberSwipeToDismissBoxState(
+                confirmValueChange = { value ->
+                  if (value != SwipeToDismissBoxValue.Settled) {
+                    onDismissAttraction(attraction)
+                    true
+                  } else {
+                    false
+                  }
+                },
+              )
+              SwipeToDismissBox(
+                state = dismissState,
+                backgroundContent = {
+                  val alignEnd = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                  Box(
+                    modifier = Modifier
+                      .fillMaxSize()
+                      .clip(MaterialTheme.shapes.medium)
+                      .background(MaterialTheme.colorScheme.errorContainer)
+                      .padding(horizontal = 16.dp),
+                    contentAlignment = if (alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
+                  ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                      Icon(
+                        imageVector = Icons.Rounded.DeleteOutline,
+                        contentDescription = "Dismiss attraction",
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                      )
+                      Spacer(modifier = Modifier.width(6.dp))
+                      Text(
+                        text = "Dismiss",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                      )
+                    }
+                  }
+                },
+                modifier = Modifier.testTag("guide_attraction_swipe_$index"),
+              ) {
+                Surface(
+                  shape = MaterialTheme.shapes.medium,
+                  color = MaterialTheme.colorScheme.surface,
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
+                ) {
+                  Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                  ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                      Icon(
+                        imageVector = Icons.Rounded.Place,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                      )
+                      Spacer(modifier = Modifier.width(6.dp))
+                      Text(
+                        text = attraction.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                      )
+                      if (attraction.area.isNotBlank()) {
+                        Surface(
+                          shape = MaterialTheme.shapes.small,
+                          color = MaterialTheme.colorScheme.secondaryContainer,
+                        ) {
+                          Text(
+                            text = attraction.area,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                          )
+                        }
+                      }
+                    }
+                    if (attraction.description.isNotBlank()) {
+                      Text(
+                        text = attraction.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      )
+                    }
+                    if (attraction.suggestedItem.isNotBlank()) {
+                      val added = attraction.suggestedItem.trim().lowercase(Locale.ROOT) in existingItemNames
+                      OutlinedButton(
+                        onClick = {
+                          onAddSuggestedItem(
+                            attraction.suggestedItem,
+                            "Activity Gear",
+                            "For visiting ${attraction.name}",
+                          )
+                        },
+                        enabled = !added,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier
+                          .heightIn(min = 48.dp)
+                          .testTag("guide_attraction_add_$index"),
+                      ) {
+                        Icon(
+                          imageVector = if (added) Icons.Rounded.Check else Icons.Rounded.Add,
+                          contentDescription = null,
+                          modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                          text = if (added) "Added: ${attraction.suggestedItem}" else "Pack ${attraction.suggestedItem}",
+                          maxLines = 1,
+                          overflow = TextOverflow.Ellipsis,
+                        )
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // 4. Local & Seasonal Events
+        if (guide.localEvents.isNotEmpty()) {
+          Text(
+            text = "Events Around Your Dates",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+          )
+          guide.localEvents.forEachIndexed { index, ev ->
+            Surface(
+              shape = MaterialTheme.shapes.medium,
+              color = MaterialTheme.colorScheme.surface,
+              modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
+            ) {
+              Column(
+                modifier = Modifier.padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+              ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Icon(
+                    imageVector = Icons.Rounded.Event,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.size(16.dp),
+                  )
+                  Spacer(modifier = Modifier.width(6.dp))
+                  Text(
+                    text = ev.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                  )
+                }
+                val meta = listOf(ev.timing, ev.venue).filter { it.isNotBlank() }.joinToString(" · ")
+                if (meta.isNotBlank()) {
+                  Text(
+                    text = meta,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                }
+                if (ev.description.isNotBlank()) {
+                  Text(
+                    text = ev.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  )
+                }
+                if (ev.suggestedItem.isNotBlank()) {
+                  val added = ev.suggestedItem.trim().lowercase(Locale.ROOT) in existingItemNames
+                  OutlinedButton(
+                    onClick = {
+                      onAddSuggestedItem(
+                        ev.suggestedItem,
+                        "Activity Gear",
+                        "For event: ${ev.title}",
+                      )
+                    },
+                    enabled = !added,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier
+                      .heightIn(min = 48.dp)
+                      .testTag("guide_event_add_$index"),
+                  ) {
+                    Icon(
+                      imageVector = if (added) Icons.Rounded.Check else Icons.Rounded.Add,
+                      contentDescription = null,
+                      modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                      text = if (added) "Added: ${ev.suggestedItem}" else "Pack ${ev.suggestedItem}",
+                      maxLines = 1,
+                      overflow = TextOverflow.Ellipsis,
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun GuidePrepRow(
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  title: String,
+  body: String,
+  actionLabel: String,
+  alreadyAdded: Boolean,
+  buttonTag: String,
+  onAction: () -> Unit,
+) {
+  Surface(
+    shape = MaterialTheme.shapes.medium,
+    color = MaterialTheme.colorScheme.surfaceContainer,
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Column(
+      modifier = Modifier.padding(10.dp),
+      verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+      Row(verticalAlignment = Alignment.Top) {
+        Icon(
+          imageVector = icon,
+          contentDescription = null,
+          tint = MaterialTheme.colorScheme.primary,
+          modifier = Modifier
+            .padding(top = 2.dp)
+            .size(18.dp),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
           )
           Text(
-            text = "Also save to Always Bring vault",
-            style = MaterialTheme.typography.bodyMedium,
+            text = body,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
         }
       }
-    },
-    confirmButton = {
-      Button(
-        onClick = {
-          val qty = quantityText.toLongOrNull()?.coerceIn(1L, 99L) ?: 1L
-          onAdd(name, category, qty, saveAlwaysBring)
-        },
-        enabled = name.isNotBlank(),
-        modifier = Modifier.testTag("confirm_add_item_button"),
+      OutlinedButton(
+        onClick = onAction,
+        enabled = !alreadyAdded,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        modifier = Modifier
+          .heightIn(min = 48.dp)
+          .testTag(buttonTag),
       ) {
-        Text("Add")
+        Icon(
+          imageVector = if (alreadyAdded) Icons.Rounded.Check else Icons.Rounded.Add,
+          contentDescription = null,
+          modifier = Modifier.size(16.dp),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(actionLabel, maxLines = 1, softWrap = false)
       }
-    },
-    dismissButton = {
-      TextButton(onClick = onDismiss) { Text("Cancel") }
-    },
-  )
+    }
+  }
 }

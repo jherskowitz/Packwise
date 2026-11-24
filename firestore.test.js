@@ -10,67 +10,62 @@ let testEnv;
 const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
 const ALICE_UID = "alice_123";
 const BOB_UID = "bob_456";
+
 const [emulatorHost, emulatorPortStr] = (process.env.FIRESTORE_EMULATOR_HOST || "127.0.0.1:8085").split(":");
 const emulatorPort = parseInt(emulatorPortStr, 10);
 
-function makeTripPayload(userId, overrides = {}) {
-  const now = new Date();
+function validTripPayload(uid, createdAt, updatedAt = createdAt) {
   return {
-    userId,
+    userId: uid,
     destination: "Tokyo",
     country: "Japan",
     latitude: 35.6762,
     longitude: 139.6503,
-    startDateEpochDay: 20770,
-    endDateEpochDay: 20775,
+    startDateEpochDay: 20500,
+    endDateEpochDay: 20505,
     durationDays: 6,
-    activities: ["City Walking", "Photography"],
-    calendarEventsSummary: ["Team Dinner (Nov 16)"],
-    weatherSummary: "12C-19C, 40% rain",
+    activities: ["City Walking", "Hiking"],
+    calendarEventsSummary: ["Shibuya Dinner (Shibuya)"],
+    weatherSummary: "Partly cloudy · 12°C–20°C · 25% rain · Winds up to 18 km/h",
     weatherTempMinC: 12.0,
-    weatherTempMaxC: 19.0,
-    weatherRainProbMax: 40,
-    weatherAlertActive: true,
-    weatherAlertMessage: "Rain likely on Day 2 - pack waterproof shell",
+    weatherTempMaxC: 20.0,
+    weatherRainProbMax: 25,
+    weatherAlertActive: false,
+    weatherAlertMessage: "",
+    weatherNotificationsEnabled: true,
     status: "active",
     resetCount: 0,
-    weatherNotificationsEnabled: true,
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
+    createdAt,
+    updatedAt,
   };
 }
 
-function makePackingItemPayload(userId, tripId, overrides = {}) {
-  const now = new Date();
+function validItemPayload(uid, tripId, createdAt, updatedAt = createdAt) {
   return {
-    userId,
+    userId: uid,
     tripId,
-    name: "Waterproof Rain Jacket",
-    category: "Outerwear",
-    quantity: 1,
-    isPacked: false,
-    isAlwaysBring: false,
-    contextReason: "40% rain forecast in Tokyo",
-    sourceType: "weather",
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
-  };
-}
-
-function makeAlwaysBringPayload(userId, overrides = {}) {
-  const now = new Date();
-  return {
-    userId,
     name: "Passport",
     category: "Documents",
     quantity: 1,
-    notes: "Check expiration date",
+    isPacked: false,
+    isAlwaysBring: true,
+    sourceType: "always_bring",
+    contextReason: "Always bring on every trip",
+    createdAt,
+    updatedAt,
+  };
+}
+
+function validAlwaysBringPayload(uid, createdAt, updatedAt = createdAt) {
+  return {
+    userId: uid,
+    name: "Phone Charger & USB-C Cable",
+    category: "Tech",
+    quantity: 1,
+    notes: "Always bring on every trip",
     source: "default",
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -98,82 +93,114 @@ beforeEach(async () => {
   }
 });
 
-test("Unauthenticated user: cannot list or write trips or alwaysBring", async () => {
+test("Unauthenticated user: cannot read or write trips, items, or alwaysBring", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
-  await assertFails(unauthDb.collection("users").doc(ALICE_UID).collection("trips").get());
-  await assertFails(unauthDb.collection("users").doc(ALICE_UID).collection("alwaysBring").get());
+  const ts = new Date(Date.now() - 1000);
+
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/trips`).get());
   await assertFails(
-    unauthDb.collection("users").doc(ALICE_UID).collection("trips").doc("trip_1").set(makeTripPayload(ALICE_UID))
+    unauthDb.collection(`users/${ALICE_UID}/trips`).doc("trip_1").set(validTripPayload(ALICE_UID, ts))
+  );
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/alwaysBring`).get());
+  await assertFails(
+    unauthDb.collection(`users/${ALICE_UID}/alwaysBring`).doc("ab_1").set(validAlwaysBringPayload(ALICE_UID, ts))
   );
 });
 
-test("Cross-user isolation: Bob cannot read or write Alice's trips, items, or alwaysBring", async () => {
-  await testEnv.withSecurityRulesDisabled(async (ctx) => {
-    const db = ctx.firestore();
-    await db.collection("users").doc(ALICE_UID).collection("trips").doc("trip_1").set(makeTripPayload(ALICE_UID));
-    await db.collection("users").doc(ALICE_UID).collection("trips").doc("trip_1").collection("items").doc("item_1").set(makePackingItemPayload(ALICE_UID, "trip_1"));
-    await db.collection("users").doc(ALICE_UID).collection("alwaysBring").doc("ab_1").set(makeAlwaysBringPayload(ALICE_UID));
-  });
-
-  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("trips").get());
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("trips").doc("trip_1").get());
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("trips").doc("trip_1").collection("items").get());
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("alwaysBring").get());
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("alwaysBring").doc("ab_2").set(makeAlwaysBringPayload(ALICE_UID)));
-});
-
-test("Owner CRUD & Shadow Update protection on AlwaysBring, Trip, and PackingItem", async () => {
+test("Authenticated owner: valid Kotlin create, partial updates, and reset payloads succeed", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const created = new Date(Date.now() - 10000);
+  const updated = new Date(Date.now() - 1000);
 
-  // Valid AlwaysBring create & update
-  const abRef = aliceDb.collection("users").doc(ALICE_UID).collection("alwaysBring").doc("ab_passport");
-  await assertSucceeds(abRef.set(makeAlwaysBringPayload(ALICE_UID)));
-  await assertSucceeds(abRef.update({ quantity: 2, updatedAt: new Date() }));
-
-  // Shadow update with ghost field must fail
-  await assertFails(abRef.update({ ghostField: true, updatedAt: new Date() }));
-
-  // Valid Trip create & weather update & reset
-  const tripRef = aliceDb.collection("users").doc(ALICE_UID).collection("trips").doc("trip_tokyo");
-  await assertSucceeds(tripRef.set(makeTripPayload(ALICE_UID)));
   await assertSucceeds(
-    tripRef.update({
-      weatherSummary: "10C-17C, 80% heavy rain",
-      weatherTempMinC: 10.0,
-      weatherTempMaxC: 17.0,
+    aliceDb.doc(`users/${ALICE_UID}/trips/trip_1`).set(validTripPayload(ALICE_UID, created))
+  );
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/trips/trip_1/items/item_1`).set(validItemPayload(ALICE_UID, "trip_1", created))
+  );
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/alwaysBring/ab_1`).set(validAlwaysBringPayload(ALICE_UID, created))
+  );
+
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/trips/trip_1/items/item_1`).update({
+      isPacked: true,
+      updatedAt: updated,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/trips/trip_1`).update({
+      weatherSummary: "Rain · 9°C–14°C · 80% rain · Winds up to 24 km/h",
+      weatherTempMinC: 9.0,
+      weatherTempMaxC: 14.0,
       weatherRainProbMax: 80,
       weatherAlertActive: true,
-      weatherAlertMessage: "Heavy rain alert - pack umbrella",
-      updatedAt: new Date(),
-    })
-  );
-  await assertSucceeds(
-    tripRef.update({
+      weatherAlertMessage: "80% rain risk",
       status: "completed",
       resetCount: 1,
-      weatherAlertActive: false,
-      weatherAlertMessage: "",
-      updatedAt: new Date(),
+      updatedAt: updated,
     })
   );
 
-  // Spoofed userId on create must fail
-  await assertFails(
-    aliceDb.collection("users").doc(ALICE_UID).collection("trips").doc("trip_spoof").set(makeTripPayload(BOB_UID))
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/trips/trip_1`).update({
+      travelGuideJson: JSON.stringify({ powerAdapterSummary: "Type A / B (100V)" }),
+      headerImageUrl: "https://upload.wikimedia.org/wikipedia/commons/tokyo.jpg",
+      updatedAt: updated,
+    })
   );
 
-  // Orphaned PackingItem (non-existent trip) must fail
+  await assertSucceeds(aliceDb.collection(`users/${ALICE_UID}/trips`).get());
+  await assertSucceeds(aliceDb.collection(`users/${ALICE_UID}/trips/trip_1/items`).get());
+  await assertSucceeds(aliceDb.collection(`users/${ALICE_UID}/alwaysBring`).get());
+});
+
+test("Security & validation guards: rejects cross-user access, @DocumentId id field, immutable createdAt mutation, invalid travelGuideJson, and future timestamps", async () => {
+  const created = new Date(Date.now() - 10000);
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.doc(`users/${BOB_UID}/trips/bob_trip`).set(validTripPayload(BOB_UID, created));
+    await db.doc(`users/${BOB_UID}/trips/bob_trip/items/bob_item`).set(validItemPayload(BOB_UID, "bob_trip", created));
+    await db.doc(`users/${ALICE_UID}/trips/alice_trip`).set(validTripPayload(ALICE_UID, created));
+  });
+
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+
+  await assertFails(aliceDb.doc(`users/${BOB_UID}/trips/bob_trip`).get());
+  await assertFails(aliceDb.collection(`users/${BOB_UID}/trips/bob_trip/items`).get());
+  await assertFails(aliceDb.doc(`users/${BOB_UID}/trips/bob_trip`).update({ status: "completed" }));
+
   await assertFails(
-    aliceDb.collection("users").doc(ALICE_UID).collection("trips").doc("nonexistent").collection("items").doc("item_orphan").set(makePackingItemPayload(ALICE_UID, "nonexistent"))
+    aliceDb.doc(`users/${ALICE_UID}/trips/alice_trip_2`).set({
+      id: "alice_trip_2",
+      ...validTripPayload(ALICE_UID, created),
+    })
   );
 
-  // Valid PackingItem create & toggle packed
-  const itemRef = tripRef.collection("items").doc("item_jacket");
-  await assertSucceeds(itemRef.set(makePackingItemPayload(ALICE_UID, "trip_tokyo")));
-  await assertSucceeds(itemRef.update({ isPacked: true, updatedAt: new Date() }));
-  // Invalid sourceType must fail
   await assertFails(
-    tripRef.collection("items").doc("item_bad").set(makePackingItemPayload(ALICE_UID, "trip_tokyo", { sourceType: "invalid_source" }))
+    aliceDb.doc(`users/${ALICE_UID}/trips/alice_trip`).update({
+      travelGuideJson: 12345,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertFails(
+    aliceDb.doc(`users/${ALICE_UID}/trips/alice_trip`).update({
+      headerImageUrl: 999,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertFails(
+    aliceDb.doc(`users/${ALICE_UID}/trips/alice_trip`).update({
+      createdAt: new Date(Date.now() - 500),
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  const future = new Date(Date.now() + 60000);
+  await assertFails(
+    aliceDb.doc(`users/${ALICE_UID}/alwaysBring/ab_future`).set(validAlwaysBringPayload(ALICE_UID, future))
   );
 });

@@ -18,20 +18,6 @@ object WeatherNotificationHelper {
   const val CHANNEL_ID = "weather_packing_alerts"
   const val EXTRA_TRIP_ID = "extra_trip_id"
 
-  fun ensureChannel(context: Context) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val channel = NotificationChannel(
-        CHANNEL_ID,
-        "Weather Packing Alerts",
-        NotificationManager.IMPORTANCE_DEFAULT,
-      ).apply {
-        description = "Real-time weather changes and gear packing reminders for upcoming trips"
-      }
-      val manager = context.getSystemService(NotificationManager::class.java)
-      manager?.createNotificationChannel(channel)
-    }
-  }
-
   fun hasNotificationPermission(context: Context): Boolean {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       ContextCompat.checkSelfPermission(
@@ -43,15 +29,28 @@ object WeatherNotificationHelper {
     }
   }
 
-  fun postWeatherAlertNotification(
+  fun ensureChannel(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+      val channel = NotificationChannel(
+        CHANNEL_ID,
+        "Weather Packing Alerts",
+        NotificationManager.IMPORTANCE_HIGH,
+      ).apply {
+        description = "Real-time weather changes and gear packing reminders for upcoming trips"
+      }
+      manager?.createNotificationChannel(channel)
+    }
+  }
+
+  fun showWeatherPackingAlert(
     context: Context,
     tripId: String,
     destination: String,
-    title: String,
     message: String,
-  ): Boolean {
+  ) {
+    if (!hasNotificationPermission(context)) return
     ensureChannel(context)
-    if (!hasNotificationPermission(context)) return false
 
     val intent = Intent(context, MainActivity::class.java).apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -65,16 +64,15 @@ object WeatherNotificationHelper {
     )
 
     val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-      .setSmallIcon(R.mipmap.ic_launcher)
-      .setContentTitle("$destination · $title")
+      .setSmallIcon(R.drawable.packwise_icon_fg)
+      .setContentTitle("Weather Packing Alert · $destination")
       .setContentText(message)
       .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-      .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-      .setContentIntent(pendingIntent)
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
       .setAutoCancel(true)
+      .setContentIntent(pendingIntent)
       .build()
 
     NotificationManagerCompat.from(context).notify(tripId.hashCode(), notification)
-    return true
   }
 }

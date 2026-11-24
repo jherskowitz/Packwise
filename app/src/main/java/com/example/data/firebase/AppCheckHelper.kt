@@ -27,9 +27,8 @@ fun configureAppCheck(context: Context, intent: Intent?) {
         val persistenceKey = FirebaseApp.getInstance().persistenceKey
         val prefs = context.getSharedPreferences(
           "$DEBUG_STORE_PREFIX$persistenceKey",
-          Context.MODE_PRIVATE
+          Context.MODE_PRIVATE,
         )
-        // Synchronous commit() ensures the debug token is persisted before DebugAppCheckProviderFactory reads it.
         prefs.edit()
           .putString(DEBUG_SECRET_KEY, debugToken)
           .commit()
@@ -39,7 +38,7 @@ fun configureAppCheck(context: Context, intent: Intent?) {
       }
 
       FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
-        DebugAppCheckProviderFactory.getInstance()
+        DebugAppCheckProviderFactory.getInstance(),
       )
       Log.d(TAG, "DebugAppCheckProviderFactory installed.")
     } else {
@@ -48,7 +47,7 @@ fun configureAppCheck(context: Context, intent: Intent?) {
         val siteKey = context.getString(resId)
         if (siteKey.isNotBlank()) {
           FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
-            RecaptchaAppCheckProviderFactory.getInstance(siteKey)
+            RecaptchaAppCheckProviderFactory.getInstance(siteKey),
           )
           Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
         } else {

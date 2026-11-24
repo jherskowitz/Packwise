@@ -2,7 +2,6 @@ package com.example.data.remote
 
 import com.example.data.model.DailyForecastPoint
 import com.example.data.model.DestinationPlace
-import com.example.data.model.DraftPackingItem
 import com.example.data.model.WeatherForecastSummary
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
@@ -15,6 +14,7 @@ import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Query
 import java.time.LocalDate
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
@@ -39,12 +39,12 @@ data class OpenMeteoForecastResponse(
 
 @JsonClass(generateAdapter = true)
 data class DailyWeatherDto(
-  val time: List<String> = emptyList(),
-  @Json(name = "weather_code") val weatherCode: List<Int> = emptyList(),
-  @Json(name = "temperature_2m_max") val temperatureMax: List<Double> = emptyList(),
-  @Json(name = "temperature_2m_min") val temperatureMin: List<Double> = emptyList(),
-  @Json(name = "precipitation_probability_max") val precipitationProbMax: List<Int?> = emptyList(),
-  @Json(name = "wind_speed_10m_max") val windSpeedMax: List<Double?> = emptyList(),
+  val time: List<String>? = null,
+  @Json(name = "weather_code") val weatherCode: List<Int>? = null,
+  @Json(name = "temperature_2m_max") val tempMax: List<Double>? = null,
+  @Json(name = "temperature_2m_min") val tempMin: List<Double>? = null,
+  @Json(name = "precipitation_probability_max") val precipProbMax: List<Int>? = null,
+  @Json(name = "wind_speed_10m_max") val windSpeedMax: List<Double>? = null,
 )
 
 interface OpenMeteoGeocodingApi {
@@ -64,7 +64,7 @@ interface OpenMeteoForecastApi {
     @Query("longitude") longitude: Double,
     @Query("daily") daily: String = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
     @Query("timezone") timezone: String = "auto",
-    @Query("forecast_days") forecastDays: Int = 14,
+    @Query("forecast_days") forecastDays: Int = 10,
   ): OpenMeteoForecastResponse
 }
 
@@ -73,40 +73,42 @@ class WeatherRepository {
     .addLast(KotlinJsonAdapterFactory())
     .build()
 
-  private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-    .connectTimeout(15, TimeUnit.SECONDS)
-    .readTimeout(15, TimeUnit.SECONDS)
-    .addInterceptor(
-      HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
-    )
+  private val client: OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(8, TimeUnit.SECONDS)
+    .readTimeout(8, TimeUnit.SECONDS)
+    .writeTimeout(8, TimeUnit.SECONDS)
+    .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
     .build()
 
   private val geocodingApi: OpenMeteoGeocodingApi = Retrofit.Builder()
     .baseUrl("https://geocoding-api.open-meteo.com/")
-    .client(okHttpClient)
+    .client(client)
     .addConverterFactory(MoshiConverterFactory.create(moshi))
     .build()
     .create(OpenMeteoGeocodingApi::class.java)
 
   private val forecastApi: OpenMeteoForecastApi = Retrofit.Builder()
     .baseUrl("https://api.open-meteo.com/")
-    .client(okHttpClient)
+    .client(client)
     .addConverterFactory(MoshiConverterFactory.create(moshi))
     .build()
     .create(OpenMeteoForecastApi::class.java)
 
   suspend fun searchDestinations(query: String): Result<List<DestinationPlace>> = runCatching {
-    if (query.trim().length < 2) return@runCatching emptyList()
-    val response = geocodingApi.searchPlaces(query.trim())
-    response.results.orEmpty().map { dto ->
-      DestinationPlace(
-        name = dto.name,
-        country = dto.country.orEmpty(),
-        admin1 = dto.admin1.orEmpty(),
-        latitude = dto.latitude,
-        longitude = dto.longitude,
-      )
-    }
+    val trimmed = query.trim()
+    if (trimmed.length < 2) return@runCatching emptyList()
+    val res = geocodingApi.searchPlaces(trimmed)
+    res.results.orEmpty()
+      .filter { it.name.isNotBlank() }
+      .map {
+        DestinationPlace(
+          name = it.name,
+          country = it.country.orEmpty(),
+          admin1 = it.admin1.orEmpty(),
+          latitude = it.latitude,
+          longitude = it.longitude,
+        )
+      }
   }
 
   suspend fun fetchForecastForTrip(
@@ -116,115 +118,66 @@ class WeatherRepository {
     endEpochDay: Long,
   ): Result<WeatherForecastSummary> = runCatching {
     val response = forecastApi.getDailyForecast(latitude = latitude, longitude = longitude)
-    val daily = response.daily ?: throw IllegalStateException("No daily weather data returned")
-    val startDate = LocalDate.ofEpochDay(startEpochDay)
-    val endDate = LocalDate.ofEpochDay(endEpochDay)
+    val daily = response.daily ?: throw IllegalStateException("Forecast unavailable for destination")
+    val dates = daily.time.orEmpty()
+    if (dates.isEmpty()) throw IllegalStateException("No daily weather data returned")
 
-    val allPoints = daily.time.indices.mapNotNull { idx ->
-      val dateStr = daily.time.getOrNull(idx) ?: return@mapNotNull null
-      val minT = daily.temperatureMin.getOrNull(idx) ?: 15.0
-      val maxT = daily.temperatureMax.getOrNull(idx) ?: 22.0
-      val rain = daily.precipitationProbMax.getOrNull(idx) ?: 0
-      val wind = daily.windSpeedMax.getOrNull(idx) ?: 10.0
-      val code = daily.weatherCode.getOrNull(idx) ?: 0
+    val startIso = LocalDate.ofEpochDay(startEpochDay).toString()
+    val endIso = LocalDate.ofEpochDay(endEpochDay).toString()
+
+    val allPoints = dates.indices.map { i ->
+      val code = daily.weatherCode?.getOrNull(i) ?: 0
       DailyForecastPoint(
-        dateIso = dateStr,
-        tempMinC = minT,
-        tempMaxC = maxT,
-        rainProbPct = rain,
-        windMaxKmh = wind,
+        dateIso = dates[i],
+        tempMinC = daily.tempMin?.getOrNull(i) ?: 14.0,
+        tempMaxC = daily.tempMax?.getOrNull(i) ?: 22.0,
+        rainProbPct = daily.precipProbMax?.getOrNull(i) ?: 0,
+        windMaxKmh = daily.windSpeedMax?.getOrNull(i) ?: 10.0,
         weatherCode = code,
-        conditionLabel = mapWmoCode(code),
+        conditionLabel = weatherCodeToLabel(code),
       )
     }
 
-    val tripPoints = allPoints.filter { point ->
-      val d = runCatching { LocalDate.parse(point.dateIso) }.getOrNull() ?: return@filter false
-      !d.isBefore(startDate) && !d.isAfter(endDate)
-    }.ifEmpty { allPoints.take(7) }
-
-    if (tripPoints.isEmpty()) {
-      throw IllegalStateException("Forecast unavailable for destination")
-    }
-
-    val minC = tripPoints.minOf { it.tempMinC }
-    val maxC = tripPoints.maxOf { it.tempMaxC }
-    val maxRain = tripPoints.maxOf { it.rainProbPct }.toLong()
-    val maxWind = tripPoints.maxOf { it.windMaxKmh }
-    val dominantCondition = tripPoints
+    val matchingPoints = allPoints.filter { it.dateIso in startIso..endIso }.ifEmpty { allPoints }
+    val minC = matchingPoints.minOf { it.tempMinC }
+    val maxC = matchingPoints.maxOf { it.tempMaxC }
+    val maxRain = matchingPoints.maxOf { it.rainProbPct }.toLong()
+    val maxWind = matchingPoints.maxOf { it.windMaxKmh }
+    val primaryCondition = matchingPoints
       .groupingBy { it.conditionLabel }
       .eachCount()
       .maxByOrNull { it.value }
-      ?.key ?: "Clear"
+      ?.key ?: "Variable weather"
 
-    val alerts = mutableListOf<String>()
-    val recommendedGear = mutableListOf<DraftPackingItem>()
+    val alertReasons = mutableListOf<String>()
+    val recommendedGear = mutableListOf<String>()
 
-    if (maxRain >= 40L) {
-      alerts.add("$maxRain% rain risk — pack waterproof jacket & compact umbrella")
-      recommendedGear.add(
-        DraftPackingItem(
-          name = "Waterproof Rain Jacket",
-          category = "Outerwear",
-          quantity = 1L,
-          isAlwaysBring = false,
-          contextReason = "$maxRain% rain chance in live forecast",
-          sourceType = "weather",
-        )
-      )
-      recommendedGear.add(
-        DraftPackingItem(
-          name = "Compact Travel Umbrella",
-          category = "Weather Gear",
-          quantity = 1L,
-          isAlwaysBring = false,
-          contextReason = "$maxRain% rain chance in live forecast",
-          sourceType = "weather",
-        )
-      )
+    if (maxRain >= 45L) {
+      alertReasons += "$maxRain% rain risk — pack waterproof jacket & compact umbrella"
+      recommendedGear += listOf("Waterproof Rain Jacket", "Compact Travel Umbrella")
     }
-    if (minC <= 10.0) {
-      alerts.add("Cold temps (${minC.roundToInt()}°C) — bring thermal layers & coat")
-      recommendedGear.add(
-        DraftPackingItem(
-          name = "Insulated Coat & Thermal Layer",
-          category = "Outerwear",
-          quantity = 1L,
-          isAlwaysBring = false,
-          contextReason = "Low of ${minC.roundToInt()}°C forecasted",
-          sourceType = "weather",
-        )
-      )
+    if (minC <= 8.0) {
+      alertReasons += "Cold temps (${minC.roundToInt()}°C) — bring thermal layers & coat"
+      recommendedGear += "Insulated Coat & Thermal Layer"
     }
-    if (maxC >= 28.0) {
-      alerts.add("Warm sun (${maxC.roundToInt()}°C) — pack sunscreen & UV sunglasses")
-      recommendedGear.add(
-        DraftPackingItem(
-          name = "SPF 50 Sunscreen & Polarized Sunglasses",
-          category = "Weather Gear",
-          quantity = 1L,
-          isAlwaysBring = false,
-          contextReason = "High of ${maxC.roundToInt()}°C forecasted",
-          sourceType = "weather",
-        )
-      )
+    if (maxC >= 29.0) {
+      alertReasons += "Warm sun (${maxC.roundToInt()}°C) — pack sunscreen & UV sunglasses"
+      recommendedGear += "SPF 50 Sunscreen & Polarized Sunglasses"
     }
     if (maxWind >= 35.0) {
-      alerts.add("Gusty winds (${maxWind.roundToInt()} km/h) — pack windbreaker")
-      recommendedGear.add(
-        DraftPackingItem(
-          name = "Packable Windbreaker",
-          category = "Outerwear",
-          quantity = 1L,
-          isAlwaysBring = false,
-          contextReason = "Winds up to ${maxWind.roundToInt()} km/h",
-          sourceType = "weather",
-        )
-      )
+      alertReasons += "Gusty winds (${maxWind.roundToInt()} km/h) — pack windbreaker"
+      recommendedGear += "Packable Windbreaker"
     }
 
-    val summaryText = "${minC.roundToInt()}°C–${maxC.roundToInt()}°C · $maxRain% rain · $dominantCondition"
-    val alertMessage = alerts.firstOrNull() ?: ""
+    val summaryText = String.format(
+      Locale.US,
+      "%s · %.0f°C–%.0f°C · %d%% rain · Winds up to %.0f km/h",
+      primaryCondition,
+      minC,
+      maxC,
+      maxRain,
+      maxWind,
+    )
 
     WeatherForecastSummary(
       summaryText = summaryText,
@@ -232,23 +185,25 @@ class WeatherRepository {
       tempMaxC = maxC,
       rainProbMax = maxRain,
       maxWindKmh = maxWind,
-      alertActive = alerts.isNotEmpty(),
-      alertMessage = alertMessage,
-      dailyPoints = tripPoints,
-      recommendedGear = recommendedGear,
+      alertActive = alertReasons.isNotEmpty(),
+      alertMessage = alertReasons.joinToString(". "),
+      recommendedGear = recommendedGear.distinct(),
+      dailyPoints = matchingPoints,
     )
   }
 
-  private fun mapWmoCode(code: Int): String = when (code) {
-    0 -> "Clear sky"
-    1, 2, 3 -> "Partly cloudy"
-    45, 48 -> "Foggy"
-    51, 53, 55, 56, 57 -> "Drizzle"
-    61, 63, 65, 66, 67 -> "Rain"
-    71, 73, 75, 77 -> "Snow"
-    80, 81, 82 -> "Rain showers"
-    85, 86 -> "Snow showers"
-    95, 96, 99 -> "Thunderstorms"
-    else -> "Variable weather"
+  companion object {
+    fun weatherCodeToLabel(code: Int): String = when (code) {
+      0 -> "Clear sky"
+      1, 2, 3 -> "Partly cloudy"
+      45, 48 -> "Foggy"
+      51, 53, 55, 56, 57 -> "Drizzle"
+      61, 63, 65, 66, 67 -> "Rain"
+      71, 73, 75, 77 -> "Snow"
+      80, 81, 82 -> "Rain showers"
+      85, 86 -> "Snow showers"
+      95, 96, 99 -> "Thunderstorms"
+      else -> "Clear"
+    }
   }
 }

@@ -6,11 +6,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,18 +20,14 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.CalendarMonth
+import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.CloudQueue
 import androidx.compose.material.icons.rounded.Luggage
 import androidx.compose.material.icons.rounded.RestartAlt
-import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,7 +36,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,16 +45,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.example.R
-import com.example.data.firebase.attemptAutoSignIn
 import com.example.data.firebase.onGoogleSignInClicked
 
 @Composable
@@ -69,23 +67,7 @@ fun AuthScreen(
   val credentialManager = remember(context) { CredentialManager.create(context) }
 
   var isLoading by remember { mutableStateOf(false) }
-  var isCheckingSilent by remember { mutableStateOf(true) }
   var errorMessage by remember { mutableStateOf<String?>(null) }
-
-  LaunchedEffect(Unit) {
-    attemptAutoSignIn(
-      context = context,
-      credentialManager = credentialManager,
-      onAuthSuccess = {
-        isCheckingSilent = false
-        onAuthSuccess()
-      },
-      onUnauthenticated = {
-        isCheckingSilent = false
-      },
-      scope = scope,
-    )
-  }
 
   Surface(
     modifier = Modifier.fillMaxSize(),
@@ -94,135 +76,115 @@ fun AuthScreen(
     Box(
       modifier = Modifier
         .fillMaxSize()
-        .background(
-          Brush.verticalGradient(
-            colors = listOf(
-              MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-              MaterialTheme.colorScheme.background,
-              MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.25f),
-            )
-          )
-        )
         .statusBarsPadding()
         .navigationBarsPadding(),
       contentAlignment = Alignment.Center,
     ) {
       Column(
         modifier = Modifier
-          .widthIn(max = 560.dp)
+          .widthIn(max = 520.dp)
           .fillMaxSize()
           .verticalScroll(rememberScrollState())
-          .padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+          .padding(horizontal = 20.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.SpaceBetween,
       ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
+        Column {
+          Box(
             modifier = Modifier
-              .clip(RoundedCornerShape(999.dp))
-              .background(MaterialTheme.colorScheme.primaryContainer)
-              .padding(horizontal = 14.dp, vertical = 6.dp),
+              .fillMaxWidth()
+              .height(210.dp)
+              .clip(MaterialTheme.shapes.extraLarge),
           ) {
-            Icon(
-              imageVector = Icons.Rounded.Luggage,
-              contentDescription = null,
-              tint = MaterialTheme.colorScheme.onPrimaryContainer,
-              modifier = Modifier.size(18.dp),
+            Image(
+              painter = painterResource(id = R.drawable.img_hero_journey),
+              contentDescription = "Travel packing gear banner",
+              contentScale = ContentScale.Crop,
+              modifier = Modifier.fillMaxSize(),
             )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-              text = "PACKWISE EXPEDITIONS",
-              style = MaterialTheme.typography.labelSmall,
-              color = MaterialTheme.colorScheme.onPrimaryContainer,
+            Box(
+              modifier = Modifier
+                .fillMaxSize()
+                .background(
+                  Brush.verticalGradient(
+                    colors = listOf(Color.Transparent, Color(0xCC062529)),
+                  )
+                ),
             )
+            Column(
+              modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(18.dp),
+            ) {
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                  imageVector = Icons.Rounded.Luggage,
+                  contentDescription = null,
+                  tint = Color(0xFFCDE9EC),
+                  modifier = Modifier.size(22.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                  text = "PACKWISE",
+                  style = MaterialTheme.typography.labelLarge,
+                  color = Color(0xFFCDE9EC),
+                )
+              }
+              Spacer(modifier = Modifier.height(6.dp))
+              Text(
+                text = "Pack Smarter for Every Journey",
+                style = MaterialTheme.typography.headlineMedium,
+                color = Color.White,
+              )
+            }
           }
 
-          Spacer(modifier = Modifier.height(16.dp))
+          Spacer(modifier = Modifier.height(20.dp))
 
           Text(
-            text = "Pack Smarter for Every Journey",
-            style = MaterialTheme.typography.displaySmall,
-            color = MaterialTheme.colorScheme.onBackground,
-          )
-          Spacer(modifier = Modifier.height(8.dp))
-          Text(
-            text = "Custom checklists built from your trip length, live weather alerts, calendar events, and Google Tasks — automatically reset fresh after every trip.",
+            text = "Tailored checklists driven by trip length, live weather, and planned events.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
 
-          Spacer(modifier = Modifier.height(20.dp))
+          Spacer(modifier = Modifier.height(16.dp))
 
-          Card(
-            shape = MaterialTheme.shapes.large,
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-            modifier = Modifier
-              .fillMaxWidth()
-              .border(
-                1.dp,
-                MaterialTheme.colorScheme.outlineVariant,
-                MaterialTheme.shapes.large,
-              ),
-          ) {
-            Image(
-              painter = painterResource(id = R.drawable.img_hero_journey),
-              contentDescription = "Organized travel suitcase and topographic map",
-              contentScale = ContentScale.Crop,
-              modifier = Modifier
-                .fillMaxWidth()
-                .height(190.dp),
-            )
-          }
-
-          Spacer(modifier = Modifier.height(20.dp))
-
-          Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-          ) {
-            FeatureHighlightRow(
-              icon = Icons.Rounded.AutoAwesome,
-              title = "Context-Aware Checklists",
-              subtitle = "Tailored to days, activities, and Always Bring essentials",
-            )
-            FeatureHighlightRow(
-              icon = Icons.Rounded.CloudQueue,
-              title = "Live Weather Push Reminders",
-              subtitle = "Real-time rain, temperature, and wind packing alerts",
-            )
-            FeatureHighlightRow(
-              icon = Icons.Rounded.CalendarMonth,
-              title = "Calendar & Google Tasks Sync",
-              subtitle = "Suggests gear from planned events & imports existing lists",
-            )
-            FeatureHighlightRow(
-              icon = Icons.Rounded.RestartAlt,
-              title = "Fresh Post-Trip Reset",
-              subtitle = "One-tap reset clears packed marks for your next journey",
-            )
-          }
+          FeatureHighlightRow(
+            icon = Icons.Rounded.AutoAwesome,
+            title = "AI & Weather Aware",
+            subtitle = "Scales outfits to trip days and adds rain, cold, or heat alerts automatically.",
+          )
+          Spacer(modifier = Modifier.height(10.dp))
+          FeatureHighlightRow(
+            icon = Icons.Rounded.RestartAlt,
+            title = "Always Bring + Fresh Resets",
+            subtitle = "Keep timeless essentials synced separately and reset trip lists fresh after every return.",
+          )
+          Spacer(modifier = Modifier.height(10.dp))
+          FeatureHighlightRow(
+            icon = Icons.Rounded.Checklist,
+            title = "Google Tasks & Calendar Sync",
+            subtitle = "Import existing checklists from Google Tasks and adapt lists to planned calendar events.",
+          )
+          Spacer(modifier = Modifier.height(10.dp))
+          FeatureHighlightRow(
+            icon = Icons.Rounded.CloudQueue,
+            title = "Synced Across Trips",
+            subtitle = "Sign in with Google to back up your trips and Always Bring vault securely.",
+          )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Column(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-          if (errorMessage != null) {
+        Column(modifier = Modifier.padding(top = 20.dp)) {
+          errorMessage?.let { msg ->
             Card(
-              colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
-              ),
+              colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
               modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 12.dp),
             ) {
               Text(
-                text = errorMessage!!,
-                color = MaterialTheme.colorScheme.onErrorContainer,
+                text = msg,
                 style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
                 modifier = Modifier.padding(12.dp),
               )
             }
@@ -230,8 +192,8 @@ fun AuthScreen(
 
           Button(
             onClick = {
-              errorMessage = null
               isLoading = true
+              errorMessage = null
               onGoogleSignInClicked(
                 context = context,
                 credentialManager = credentialManager,
@@ -244,41 +206,31 @@ fun AuthScreen(
                   errorMessage = msg
                 },
                 scope = scope,
-                onAuthCancelled = { isLoading = false },
+                onAuthCancelled = {
+                  isLoading = false
+                },
               )
             },
-            enabled = !isLoading && !isCheckingSilent,
-            shape = MaterialTheme.shapes.medium,
-            colors = ButtonDefaults.buttonColors(
-              containerColor = MaterialTheme.colorScheme.primary,
-              contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
+            enabled = !isLoading,
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
             modifier = Modifier
               .fillMaxWidth()
-              .height(54.dp)
+              .heightIn(min = 52.dp)
               .testTag("google_sign_in_button"),
           ) {
-            if (isLoading || isCheckingSilent) {
+            if (isLoading) {
               CircularProgressIndicator(
                 modifier = Modifier.size(22.dp),
                 color = MaterialTheme.colorScheme.onPrimary,
-                strokeWidth = 2.5.dp,
+                strokeWidth = 2.dp,
               )
               Spacer(modifier = Modifier.width(10.dp))
-              Text(
-                text = if (isCheckingSilent) "Checking session..." else "Signing in...",
-                style = MaterialTheme.typography.labelLarge,
-              )
+              Text("Signing in...")
             } else {
-              Icon(
-                imageVector = Icons.Rounded.TaskAlt,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp),
-              )
-              Spacer(modifier = Modifier.width(10.dp))
               Text(
                 text = "Sign in with Google",
-                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
               )
             }
           }
@@ -300,29 +252,22 @@ private fun FeatureHighlightRow(
       .clip(MaterialTheme.shapes.medium)
       .background(MaterialTheme.colorScheme.surfaceContainerLow)
       .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
-      .padding(horizontal = 14.dp, vertical = 10.dp),
-    verticalAlignment = Alignment.CenterVertically,
+      .padding(12.dp),
+    verticalAlignment = Alignment.Top,
   ) {
-    Box(
+    Icon(
+      imageVector = icon,
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.primary,
       modifier = Modifier
-        .size(36.dp)
-        .clip(CircleShape)
-        .background(MaterialTheme.colorScheme.primaryContainer),
-      contentAlignment = Alignment.Center,
-    ) {
-      Icon(
-        imageVector = icon,
-        contentDescription = null,
-        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-        modifier = Modifier.size(20.dp),
-      )
-    }
+        .padding(top = 2.dp)
+        .size(20.dp),
+    )
     Spacer(modifier = Modifier.width(12.dp))
     Column {
       Text(
         text = title,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.onSurface,
+        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
       )
       Text(
         text = subtitle,
